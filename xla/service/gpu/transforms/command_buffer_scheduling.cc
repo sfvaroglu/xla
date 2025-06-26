@@ -107,6 +107,7 @@ static bool AsyncStartOrDoneCommandIsSupported(
   CHECK(hlo->opcode() == HloOpcode::kAsyncStart ||
         hlo->opcode() == HloOpcode::kAsyncDone);
 
+  VLOG(1) << "AsyncStartOrDoneCommandIsSupported: " << hlo->ToString();
   if (IsCublasGemm(*hlo->async_wrapped_instruction())) {
     return config.enabled_commands.contains(DebugOptions::CUBLAS);
   }
@@ -581,9 +582,11 @@ CommandBufferScheduling::CollectCommandBufferSequences(
     // We capture async commands if all instruction between start and done can
     // be outlined into a command buffer.
     if (IsAsyncStartCommand(inst, config)) {
+      VLOG(1) << "IsAsyncStartCommand(inst, config)";
       HloInstructionSequence seq = collect_async_region(inst);
       if (check_async_region(seq)) {
         num_commands_in_current_seq += seq.instructions().size();
+        VLOG(1) << "seq: " << num_commands_in_current_seq;
         for (HloInstruction* inst : seq.instructions()) {
           current_seq.push_back(inst);
         }
@@ -591,7 +594,7 @@ CommandBufferScheduling::CollectCommandBufferSequences(
         continue;
       }
     }
-
+    VLOG(1) << "collect_current_seq()";
     // If we didn't find the next command, collect the current sequence and
     // start a new one.
     collect_current_seq();
@@ -599,6 +602,7 @@ CommandBufferScheduling::CollectCommandBufferSequences(
 
   // Don't forget to collect the final command sequence.
   collect_current_seq();
+  VLOG(1) << "sequences: " << sequences.size();
   return sequences;
 }
 
@@ -651,6 +655,7 @@ absl::StatusOr<bool> CommandBufferScheduling::MoveParametersAndConstantsToFront(
 
 absl::StatusOr<CommandBuffer> CommandBufferScheduling::PrepareCommandBuffer(
     const HloInstructionSequence& seq, HloModule* module) {
+  VLOG(1) << "PrepareCommandBuffer";
   auto builder = HloComputation::Builder("command_buffer");
 
   absl::Span<HloInstruction* const> instructions =
@@ -683,12 +688,20 @@ absl::StatusOr<CommandBuffer> CommandBufferScheduling::PrepareCommandBuffer(
 
   // Create parameters in the command buffer computation for captured values.
   for (HloInstruction* inst : instructions) {
+    VLOG(1) << "inst: " << inst->ToString();
     for (HloInstruction* operand : inst->operands()) {
+      VLOG(1) << "operand: " << operand->ToString();
       // We already mapped instruction to a parameter.
-      if (parameters.contains(operand)) continue;
+      if (parameters.contains(operand)) {
+        VLOG(1) << "parameters.contains(operand)";
+        continue;
+      }
 
       // Operand instruction is a part of the command buffer.
-      if (in_command_buffer.contains(operand)) continue;
+      if (in_command_buffer.contains(operand)) {
+        VLOG(1) << "in_command_buffer.contains(operand)";
+        continue;
+      }
 
       // Create a new parameter for value defined outside of a command buffer.
       int64_t parameter_id = parameters.size();
@@ -699,12 +712,14 @@ absl::StatusOr<CommandBuffer> CommandBufferScheduling::PrepareCommandBuffer(
       parameter->UniquifyName(module);
       parameter->UniquifyId(module);
       inst_mapping[operand] = parameters[operand] = parameter;
+      VLOG(1) << "inst_mapping: " << inst_mapping[operand]->ToString();
     }
   }
 
   // Clone commands into the command buffer body with mapped operands.
   for (HloInstruction* inst : seq.instructions()) {
     HloCloneContext ctx(inst->GetModule());
+    VLOG(1) << "inst: " << inst->ToString();
 
     // Cloned instructions should call the same computations as original
     // instructions will be dead code eliminated.
