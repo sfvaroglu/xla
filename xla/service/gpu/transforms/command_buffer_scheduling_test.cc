@@ -237,43 +237,123 @@ TEST_F(CommandBufferSchedulingTest, AllReduceStartFollowedByDone) {
                             });
 }
 
-TEST_F(CommandBufferSchedulingTest, NvshmemAllReduceStartFollowedByDone) {
+TEST_F(CommandBufferSchedulingTest, NvshmemAllReduceWithDefaultConfig) {
   const char* hlo = R"(
     HloModule TestModule, is_scheduled=true
 
-    %add (p0: s32[1], p1: s32[1]) -> s32[1] {
-      %p0 = s32[1] parameter(0)
-      %p1 = s32[1] parameter(1)
-      ROOT %add = s32[1] add(s32[1] %p0, s32[1] %p1)
+    %add (p0: s32[4], p1: s32[4]) -> s32[4] {
+      %p0 = s32[4] parameter(0)
+      %p1 = s32[4] parameter(1)
+      ROOT %add = s32[4] add(s32[4] %p0, s32[4] %p1)
     }
 
-    ENTRY %main (a: s32[1]) -> s32[1] {
-      %a = s32[1] parameter(0)
-      %reshape = s32[1] reshape(s32[1] %a)
-      %start = s32[1]{0} all-reduce-start(s32[1]{0} %reshape), to_apply=%add,
+    ENTRY %main (a: s32[4]) -> s32[4] {
+      %a = s32[4] parameter(0)
+      %start = s32[4]{0} all-reduce-start(s32[4]{0} %a),
+        replica_groups={{0,1}}, to_apply=%add,
         backend_config={"collective_backend_config":{"backend":"NVSHMEM"}}
-      ROOT %done = s32[1]{0} all-reduce-done(s32[1]{0} %start)
+      ROOT %done = s32[4]{0} all-reduce-done(s32[4]{0} %start)
     })";
 
   const char* expected = R"(
-    CHECK: %command_buffer ([[P0:.+]]: s32[1]) -> s32[1] {
-    CHECK:   %[[P0]] = s32[1]{0} parameter(0)
-    CHECK:   %[[RESHAPE:.+]] = s32[1]{0} reshape(%[[P0]])
-    CHECK:   %[[START:.+]] = s32[1]{0} all-reduce-start(%[[RESHAPE]])
-    CHECK:   ROOT %[[DONE:.+]] = s32[1]{0} all-reduce-done(%[[START]])
+    CHECK: %command_buffer ([[P0:.+]]: s32[4]) -> s32[4] {
+    CHECK:   %[[P0]] = s32[4]{0} parameter(0)
+    CHECK:   %[[START:.+]] = s32[4]{0} all-reduce-start(%[[P0]])
+    CHECK:   ROOT %[[DONE:.+]] = s32[4]{0} all-reduce-done(%[[START]])
     CHECK: }
 
-    CHECK: ENTRY %main (a: s32[1]) -> s32[1] {
-    CHECK:   %[[A:.+]] = s32[1]{0} parameter(0)
-    CHECK:   ROOT %[[CALL:.+]] = s32[1]{0} call(%[[A]]),
+    CHECK: ENTRY %main (a: s32[4]) -> s32[4] {
+    CHECK:   %[[A:.+]] = s32[4]{0} parameter(0)
+    CHECK:   ROOT %[[CALL:.+]] = s32[4]{0} call(%[[A]]),
     CHECK:     to_apply=%command_buffer
     CHECK: })";
+
+  HloModuleConfig config;
+  DebugOptions options = GetDebugOptionsForTest();
+  options.clear_xla_gpu_enable_command_buffer();
+  options.add_xla_gpu_enable_command_buffer(DebugOptions::FUSION);
+  config.set_debug_options(options);
 
   RunAndFilecheckHloRewrite(hlo, CommandBufferScheduling(device_desc()),
                             expected, [](HloModule* module) {
                               EXPECT_TRUE(module->has_schedule());
                               TF_CHECK_OK(module->schedule().Verify());
-                            });
+                            }, &config);
+}
+
+TEST_F(CommandBufferSchedulingTest, NcclAllReduceWithExplicitCollectives) {
+  const char* hlo = R"(
+    HloModule TestModule, is_scheduled=true
+
+    %add (p0: s32[4], p1: s32[4]) -> s32[4] {
+      %p0 = s32[4] parameter(0)
+      %p1 = s32[4] parameter(1)
+      ROOT %add = s32[4] add(s32[4] %p0, s32[4] %p1)
+    }
+
+    ENTRY %main (a: s32[4]) -> s32[4] {
+      %a = s32[4] parameter(0)
+      %start = s32[4]{0} all-reduce-start(s32[4]{0} %a),
+        replica_groups={{0,1}}, to_apply=%add,
+        backend_config={"collective_backend_config":{"backend":"DEFAULT"}}
+      ROOT %done = s32[4]{0} all-reduce-done(s32[4]{0} %start)
+    })";
+
+  const char* expected = R"(
+    CHECK: %command_buffer ([[P0:.+]]: s32[4]) -> s32[4] {
+    CHECK:   %[[P0]] = s32[4]{0} parameter(0)
+    CHECK:   %[[START:.+]] = s32[4]{0} all-reduce-start(%[[P0]])
+    CHECK:   ROOT %[[DONE:.+]] = s32[4]{0} all-reduce-done(%[[START]])
+    CHECK: }
+
+    CHECK: ENTRY %main (a: s32[4]) -> s32[4] {
+    CHECK:   %[[A:.+]] = s32[4]{0} parameter(0)
+    CHECK:   ROOT %[[CALL:.+]] = s32[4]{0} call(%[[A]]),
+    CHECK:     to_apply=%command_buffer
+    CHECK: })";
+
+  HloModuleConfig config;
+  DebugOptions options = GetDebugOptionsForTest();
+  options.add_xla_gpu_enable_command_buffer(DebugOptions::FUSION);
+  options.add_xla_gpu_enable_command_buffer(DebugOptions::COLLECTIVES);
+  config.set_debug_options(options);
+
+  RunAndFilecheckHloRewrite(hlo, CommandBufferScheduling(device_desc()),
+                            expected, [](HloModule* module) {
+                              EXPECT_TRUE(module->has_schedule());
+                              TF_CHECK_OK(module->schedule().Verify());
+                            }, &config);
+}
+
+TEST_F(CommandBufferSchedulingTest, NcclAllReduceWithoutExplicitCollectives) {
+  const char* hlo = R"(
+    HloModule TestModule, is_scheduled=true
+
+    %add (p0: s32[4], p1: s32[4]) -> s32[4] {
+      %p0 = s32[4] parameter(0)
+      %p1 = s32[4] parameter(1)
+      ROOT %add = s32[4] add(s32[4] %p0, s32[4] %p1)
+    }
+
+    ENTRY %main (a: s32[4]) -> s32[4] {
+      %a = s32[4] parameter(0)
+      %start = s32[4]{0} all-reduce-start(s32[4]{0} %a),
+        replica_groups={{0,1}}, to_apply=%add,
+        backend_config={"collective_backend_config":{"backend":"NCCL"}}
+      ROOT %done = s32[4]{0} all-reduce-done(s32[4]{0} %start)
+    })";
+
+  HloModuleConfig config;
+  DebugOptions options = GetDebugOptionsForTest();
+  options.clear_xla_gpu_enable_command_buffer();
+  options.add_xla_gpu_enable_command_buffer(DebugOptions::FUSION);
+  config.set_debug_options(options);
+
+  RunAndFilecheckHloRewrite(hlo, CommandBufferScheduling(device_desc()),
+                            std::nullopt, [](HloModule* module) {
+                              EXPECT_TRUE(module->has_schedule());
+                              TF_CHECK_OK(module->schedule().Verify());
+                            }, &config);
 }
 
 TEST_F(CommandBufferSchedulingTest, AllGatherStartFollowedByDone) {
