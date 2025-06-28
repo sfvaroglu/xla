@@ -178,6 +178,7 @@ cc_library(
         ":gpublas_lt_matmul_thunk",
         ":kernel_thunk",
         ":memset_thunk",
+        ":nvshmem_all_reduce_thunk",
         ":replica_id_thunk",
         ":sequential_thunk",
         ":thunk",

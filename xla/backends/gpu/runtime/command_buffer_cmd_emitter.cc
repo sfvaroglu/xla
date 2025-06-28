@@ -24,6 +24,7 @@ limitations under the License.
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "xla/backends/gpu/collectives/gpu_clique_key.h"
 #include "xla/backends/gpu/runtime/all_gather_thunk.h"
 #include "xla/backends/gpu/runtime/all_reduce_thunk.h"
 #include "xla/backends/gpu/runtime/all_to_all_thunk.h"
@@ -37,6 +38,7 @@ limitations under the License.
 #include "xla/backends/gpu/runtime/gpublas_lt_matmul_thunk.h"
 #include "xla/backends/gpu/runtime/kernel_thunk.h"
 #include "xla/backends/gpu/runtime/memset_thunk.h"
+#include "xla/backends/gpu/runtime/nvshmem_all_reduce_thunk.h"
 #include "xla/backends/gpu/runtime/replica_id_thunk.h"
 #include "xla/backends/gpu/runtime/sequential_thunk.h"
 #include "xla/backends/gpu/runtime/thunk.h"
@@ -169,6 +171,19 @@ static absl::StatusOr<Command> Convert(const AllReduceStartThunk& thunk) {
       thunk.config(), thunk.reduction_kind(), thunk.buffers());
 }
 
+static absl::StatusOr<Command> Convert(const NvshmemAllReduceStartThunk& thunk) {
+  // Compute the collective stream ID for NVSHMEM collectives using the same logic as CollectiveThunk
+  // For NVSHMEM collectives, GetAsyncStreamKind() always returns AsyncStreamKind::kCollective
+  auto collective_stream_id = xla::gpu::GetCollectiveStreamId(
+      thunk.async_events() != nullptr, AsyncStreamKind::kCollective);
+  auto nvshmem_execution_stream_id = ExecutionStreamId(
+      thunk.execution_stream_id().value() + collective_stream_id.value());
+  
+  return std::make_unique<AllReduceCmd>(
+      nvshmem_execution_stream_id, thunk.execution_stream_id(),
+      thunk.config(), thunk.reduction_kind(), thunk.buffers());
+}
+
 static absl::StatusOr<Command> Convert(const ReduceScatterStartThunk& thunk) {
   return std::make_unique<ReduceScatterCmd>(
       thunk.nccl_execution_stream_id(), thunk.execution_stream_id(),
@@ -287,6 +302,8 @@ static absl::Status AppendCommands(CommandBufferCmdSequence& cmd_sequence,
       return append(Convert<AllGatherStartThunk>(thunk));
     case Thunk::Kind::kAllReduceStart:
       return append(Convert<AllReduceStartThunk>(thunk));
+    case Thunk::Kind::kNvshmemAllReduceStart:
+      return append(Convert<NvshmemAllReduceStartThunk>(thunk));
     case Thunk::Kind::kReduceScatterStart:
       return append(Convert<ReduceScatterStartThunk>(thunk));
     case Thunk::Kind::kAllToAllStart:
@@ -313,6 +330,7 @@ static absl::Status AppendCommands(CommandBufferCmdSequence& cmd_sequence,
     // context, as we convert async thunks to command dependency graph.
     case Thunk::Kind::kAllGatherDone:
     case Thunk::Kind::kAllReduceDone:
+    case Thunk::Kind::kNvshmemAllReduceDone:
     case Thunk::Kind::kReduceScatterDone:
     case Thunk::Kind::kAllToAllDone:
     case Thunk::Kind::kWaitForStreams:
