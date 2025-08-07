@@ -1017,6 +1017,107 @@ absl::Status RunCollectiveOptimizationPasses(
     collectives_pipeline.AddPass<CollectivePipeliner>(config);
   }
 
+  if (debug_options.xla_gpu_enable_pipelined_host_offloading() ||
+      IsPassEnabledAtOptimizationEffort<CollectivePipeliner>(*hlo_module)) {
+    // Forward pass host offloading pipelining
+    CollectivePipeliner::Config config{
+        /*level_to_operate_on=*/0,
+        /*max_pipelining_per_loop=*/INT64_MAX,
+        /*last_run=*/true,
+        /*pipeline_use_tree=*/true,
+        /*process_different_sized_ops=*/true,
+        /*pipelining_direction=*/
+        collective_pipeliner_utils::PipeliningDirection::kForward,
+        /*should_process=*/
+        [](const HloInstruction* instr) {
+          if (instr->IsCustomCall("MoveToHost")) {
+            std::vector<const HloInstruction*> to_check = {instr};
+            std::set<const HloInstruction*> visited;
+
+            while (!to_check.empty()) {
+              const HloInstruction* current = to_check.back();
+              to_check.pop_back();
+
+              if (visited.insert(current).second) {
+                for (const HloInstruction* user : current->users()) {
+                  if (user->opcode() == HloOpcode::kDynamicUpdateSlice) {
+                    return true;
+                  }
+                  if (user->opcode() == HloOpcode::kReshape ||
+                      user->opcode() == HloOpcode::kBroadcast ||
+                      user->opcode() == HloOpcode::kTranspose) {
+                    to_check.push_back(user);
+                  }
+                }
+              }
+            }
+          }
+          return false;
+        },
+        /*acceptable_formatting=*/HloPredicateTrue,
+        /*reuse_pipelined_op_buffer=*/HloPredicateFalse,
+        /*should_allow_loop_variant_parameter_in_chain=*/HloPredicateFalse,
+        /*should_allow_control_dependencies=*/false,
+        /*postprocess_backward_peeled_op=*/{},
+        /*postprocess_backward_rotated_op=*/{},
+        /*postprocess_backward_peeled_trailing_op=*/{},
+        /*should_add_loop_invariant_op_in_chain=*/false,
+        /*postprocess_pipelined_ops=*/AppendPipelinedInstruction,
+    };
+    collectives_pipeline.AddPass<CollectivePipeliner>(config);
+  }
+
+  if (debug_options.xla_gpu_enable_pipelined_host_offloading() ||
+      IsPassEnabledAtOptimizationEffort<CollectivePipeliner>(*hlo_module)) {
+    // Backward pass host offloading pipelining
+    CollectivePipeliner::Config config_backward{
+        /*level_to_operate_on=*/0,
+        /*max_pipelining_per_loop=*/INT64_MAX,
+        /*last_run=*/true,
+        /*pipeline_use_tree=*/true,
+        /*process_different_sized_ops=*/true,
+        /*pipelining_direction=*/
+        collective_pipeliner_utils::PipeliningDirection::kBackward,
+        /*should_process=*/
+        [](const HloInstruction* instr) {
+          if (instr->IsCustomCall("MoveToDevice")) {
+            std::vector<const HloInstruction*> to_check = {instr};
+            std::set<const HloInstruction*> visited;
+
+            while (!to_check.empty()) {
+              const HloInstruction* current = to_check.back();
+              to_check.pop_back();
+
+              if (visited.insert(current).second) {
+                for (const HloInstruction* operand : current->operands()) {
+                  if (operand->opcode() == HloOpcode::kDynamicSlice) {
+                    return true;
+                  }
+                  if (operand->opcode() == HloOpcode::kReshape ||
+                      operand->opcode() == HloOpcode::kBroadcast ||
+                      operand->opcode() == HloOpcode::kTranspose) {
+                    to_check.push_back(operand);
+                  }
+                }
+              }
+            }
+          }
+          return false;
+        },
+        /*acceptable_formatting=*/HloPredicateTrue,
+        /*reuse_pipelined_op_buffer=*/HloPredicateFalse,
+        /*should_allow_loop_variant_parameter_in_chain=*/HloPredicateFalse,
+        /*should_allow_control_dependencies=*/false,
+        /*postprocess_backward_peeled_op=*/{},
+        /*postprocess_backward_rotated_op=*/{},
+        /*postprocess_backward_peeled_trailing_op=*/{},
+        /*should_add_loop_invariant_op_in_chain=*/true,
+        /*postprocess_pipelined_ops=*/AppendPipelinedInstruction,
+    };
+
+    collectives_pipeline.AddPass<CollectivePipeliner>(config_backward);
+  }
+
   collectives_pipeline.AddPass<ReduceScatterCreator>();
 
   DebugOptions::PipelineParallelismOptLevel pipeline_parallelism_opt_level =

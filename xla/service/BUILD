@@ -425,6 +425,7 @@ cc_library(
         ":collective_ops_utils",
         ":collective_pipeliner_utils",
         ":constant_value",
+        ":memory_annotations_hdr",
         ":scheduling_annotations_util",
         ":value_range",
         "//xla:comparison_util",

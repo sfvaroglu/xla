@@ -60,6 +60,7 @@ limitations under the License.
 #include "xla/service/collective_ops_utils.h"
 #include "xla/service/collective_pipeliner_utils.h"
 #include "xla/service/constant_value.h"
+#include "xla/service/memory_annotations.h"
 #include "xla/service/scheduling_annotations_util.h"
 #include "xla/service/value_range.h"
 #include "xla/shape.h"
@@ -527,6 +528,35 @@ std::optional<std::vector<HloInstruction*>> CollectIndependentOperandChain(
         return !IsLoopIterator(instr, loop_iter) &&
                !loop_invariant_params.count(instr);
       };
+
+  // Check if this is a MoveToDevice custom call that follows a dynamic-slice
+  // This is a special case for backward pipelining with host offloading
+  if (instr->IsCustomCall(memory_annotations::kMoveToDeviceCustomCallTarget)) {
+    std::vector<HloInstruction*> to_check = {instr->mutable_operand(0)};
+    std::set<HloInstruction*> visited;
+
+    while (!to_check.empty()) {
+      HloInstruction* current = to_check.back();
+      to_check.pop_back();
+
+      if (visited.insert(current).second) {
+        if (current->opcode() == HloOpcode::kDynamicSlice) {
+          if (visited_set.insert(current).second) {
+            stack.emplace_back(current, 0);
+          }
+          break;
+        }
+        if (current->opcode() == HloOpcode::kReshape ||
+            current->opcode() == HloOpcode::kBroadcast ||
+            current->opcode() == HloOpcode::kTranspose) {
+          for (HloInstruction* operand : current->operands()) {
+            to_check.push_back(operand);
+          }
+        }
+      }
+    }
+  }
+
   while (!stack.empty()) {
     auto& curr = stack.back();
     if (curr.second == curr.first->operand_count()) {
@@ -3234,6 +3264,14 @@ absl::StatusOr<bool> CollectivePipeliner::RunPipeliner(
       if (instruction->opcode() != HloOpcode::kWhile) {
         continue;
       }
+      // TODO(sevin): Remove
+      // for (const HloInstruction* instr :
+      // instruction->while_body()->instructions()) {
+      //  if (config_.should_process(instr)) {
+      //    VLOG(1) << "Found matching instruction: " << instr->ToString();
+      //  }
+      //}
+
       if (std::none_of(instruction->while_body()->instructions().begin(),
                        instruction->while_body()->instructions().end(),
                        config_.should_process)) {
