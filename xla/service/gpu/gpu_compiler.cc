@@ -21,6 +21,7 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <variant>
@@ -104,6 +105,7 @@ limitations under the License.
 #include "xla/hlo/transforms/host_offload_legalize.h"
 #include "xla/hlo/transforms/host_offloader.h"
 #include "xla/hlo/transforms/host_offloading_prepare.h"
+#include "xla/service/host_offload_utils.h"
 #include "xla/hlo/transforms/operand_upcaster.h"
 #include "xla/hlo/transforms/simplifiers/algebraic_simplifier.h"
 #include "xla/hlo/transforms/simplifiers/all_gather_pad_ds_simplifier.h"
@@ -1079,32 +1081,7 @@ absl::Status RunCollectiveOptimizationPasses(
         /*process_different_sized_ops=*/true,
         /*pipelining_direction=*/
         collective_pipeliner_utils::PipeliningDirection::kForward,
-        /*should_process=*/
-        [](const HloInstruction* instr) {
-          if (instr->IsCustomCall("MoveToHost")) {
-            std::vector<const HloInstruction*> to_check = {instr};
-            std::set<const HloInstruction*> visited;
-
-            while (!to_check.empty()) {
-              const HloInstruction* current = to_check.back();
-              to_check.pop_back();
-
-              if (visited.insert(current).second) {
-                for (const HloInstruction* user : current->users()) {
-                  if (user->opcode() == HloOpcode::kDynamicUpdateSlice) {
-                    return true;
-                  }
-                  if (user->opcode() == HloOpcode::kReshape ||
-                      user->opcode() == HloOpcode::kBroadcast ||
-                      user->opcode() == HloOpcode::kTranspose) {
-                    to_check.push_back(user);
-                  }
-                }
-              }
-            }
-          }
-          return false;
-        },
+        /*should_process=*/host_offload_utils::IsHostOffloadingInstruction,
         /*acceptable_formatting=*/HloPredicateTrue,
         /*reuse_pipelined_op_buffer=*/HloPredicateFalse,
         /*should_allow_loop_variant_parameter_in_chain=*/HloPredicateFalse,
@@ -1129,32 +1106,7 @@ absl::Status RunCollectiveOptimizationPasses(
         /*process_different_sized_ops=*/true,
         /*pipelining_direction=*/
         collective_pipeliner_utils::PipeliningDirection::kBackward,
-        /*should_process=*/
-        [](const HloInstruction* instr) {
-          if (instr->IsCustomCall("MoveToDevice")) {
-            std::vector<const HloInstruction*> to_check = {instr};
-            std::set<const HloInstruction*> visited;
-
-            while (!to_check.empty()) {
-              const HloInstruction* current = to_check.back();
-              to_check.pop_back();
-
-              if (visited.insert(current).second) {
-                for (const HloInstruction* operand : current->operands()) {
-                  if (operand->opcode() == HloOpcode::kDynamicSlice) {
-                    return true;
-                  }
-                  if (operand->opcode() == HloOpcode::kReshape ||
-                      operand->opcode() == HloOpcode::kBroadcast ||
-                      operand->opcode() == HloOpcode::kTranspose) {
-                    to_check.push_back(operand);
-                  }
-                }
-              }
-            }
-          }
-          return false;
-        },
+        /*should_process=*/host_offload_utils::IsHostOffloadingInstruction,
         /*acceptable_formatting=*/HloPredicateTrue,
         /*reuse_pipelined_op_buffer=*/HloPredicateFalse,
         /*should_allow_loop_variant_parameter_in_chain=*/HloPredicateFalse,
