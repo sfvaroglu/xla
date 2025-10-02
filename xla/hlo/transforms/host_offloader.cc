@@ -838,15 +838,69 @@ absl::Status HostOffloader::CreateAllocateBufferForDynamicUpdateSlice(
         // Found a broadcast.
         found_broadcast = true;
         HloInstruction* broadcast_user = instruction_and_shape.instruction;
-        HloInstruction* allocate_buffer =
-            predecessor_instruction->parent()->AddInstruction(
-                HloInstruction::CreateCustomCall(
-                    predecessor_instruction->shape(), {}, "AllocateBuffer"));
-        SetMemorySpace(allocate_buffer->mutable_shape(),
-                       Layout::kHostMemorySpace);
+
+        // Check if this is a zero broadcast that can be optimized
+        HloInstruction* broadcast_operand =
+            predecessor_instruction->mutable_operand(0);
+        bool is_zero_broadcast = false;
+        if (broadcast_operand->opcode() == HloOpcode::kConstant) {
+          is_zero_broadcast = broadcast_operand->literal().IsAll(0);
+        } else if (broadcast_operand->opcode() == HloOpcode::kFusion) {
+          // Check if fusion contains a zero constant broadcast
+          HloComputation* fusion_computation =
+              broadcast_operand->fused_instructions_computation();
+          HloInstruction* root = fusion_computation->root_instruction();
+          if (root->opcode() == HloOpcode::kBroadcast) {
+            HloInstruction* fusion_broadcast_operand = root->mutable_operand(0);
+            if (fusion_broadcast_operand->opcode() == HloOpcode::kConstant) {
+              is_zero_broadcast = fusion_broadcast_operand->literal().IsAll(0);
+            }
+          }
+        }
+
+        HloInstruction* allocate_buffer;
+        if (is_zero_broadcast) {
+          VLOG(1) << "Optimizing zero broadcast "
+                  << predecessor_instruction->name()
+                  << " to be created directly in host memory";
+
+          Shape host_constant_shape = broadcast_operand->shape();
+          host_constant_shape.mutable_layout()->set_memory_space(
+              Layout::kHostMemorySpace);
+
+          HloInstruction* host_zero_constant =
+              predecessor_instruction->parent()->AddInstruction(
+                  HloInstruction::CreateConstant(
+                      broadcast_operand->literal().Clone()));
+          host_zero_constant->mutable_shape()
+              ->mutable_layout()
+              ->set_memory_space(Layout::kHostMemorySpace);
+
+          // Create the broadcast directly in host memory
+          Shape host_broadcast_shape = predecessor_instruction->shape();
+          host_broadcast_shape.mutable_layout()->set_memory_space(
+              Layout::kHostMemorySpace);
+
+          allocate_buffer = predecessor_instruction->parent()->AddInstruction(
+              HloInstruction::CreateBroadcast(
+                  host_broadcast_shape, host_zero_constant,
+                  predecessor_instruction->dimensions()));
+          allocate_buffer->mutable_shape()->mutable_layout()->set_memory_space(
+              Layout::kHostMemorySpace);
+        } else {
+          // For non-zero broadcasts, use the traditional AllocateBuffer
+          // approach
+          allocate_buffer = predecessor_instruction->parent()->AddInstruction(
+              HloInstruction::CreateCustomCall(predecessor_instruction->shape(),
+                                               {}, "AllocateBuffer"));
+          SetMemorySpace(allocate_buffer->mutable_shape(),
+                         Layout::kHostMemorySpace);
+        }
+
         VLOG(1) << absl::StreamFormat(
-            "Created new AllocateBuffer instruction \"%s\" to replace "
+            "Created new %s instruction \"%s\" to replace "
             "broadcast \"%s\"'s use at index %s in user \"%s\"",
+            is_zero_broadcast ? "host zero broadcast" : "AllocateBuffer",
             allocate_buffer->ToString(), predecessor_instruction->name(),
             shape_index.ToString(), broadcast_user->name());
         if (shape_index.size() == 1) {
