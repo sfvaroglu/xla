@@ -28,6 +28,7 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
+#include "xla/backends/gpu/collectives/gpu_clique_key.h"
 #include "xla/backends/gpu/runtime/all_gather_thunk.h"
 #include "xla/backends/gpu/runtime/all_reduce_thunk.h"
 #include "xla/backends/gpu/runtime/all_to_all_thunk.h"
@@ -42,6 +43,7 @@ limitations under the License.
 #include "xla/backends/gpu/runtime/gpublas_lt_matmul_thunk.h"
 #include "xla/backends/gpu/runtime/kernel_thunk.h"
 #include "xla/backends/gpu/runtime/memset_thunk.h"
+#include "xla/backends/gpu/runtime/nvshmem_all_reduce_thunk.h"
 #include "xla/backends/gpu/runtime/replica_id_thunk.h"
 #include "xla/backends/gpu/runtime/sequential_thunk.h"
 #include "xla/backends/gpu/runtime/thunk.h"
@@ -170,6 +172,29 @@ static absl::StatusOr<Command> Convert(const AllReduceStartThunk& thunk) {
                                         thunk.buffers(), thunk.async_events());
 }
 
+static absl::StatusOr<Command> Convert(const NvshmemAllReduceStartThunk& thunk,
+                                       ResourceUseVector resources) {
+  auto collective_stream_id = xla::gpu::GetCollectiveStreamId(
+      thunk.async_events() != nullptr);
+  auto nvshmem_execution_stream_id = ExecutionStreamId(
+      thunk.execution_stream_id().value() + collective_stream_id.value());
+
+  return std::make_unique<NvshmemAllReduceCmd>(
+      nvshmem_execution_stream_id, thunk.execution_stream_id(),
+      thunk.config(), thunk.reduction_kind(), thunk.buffers());
+}
+
+static absl::StatusOr<Command> Convert(const NvshmemAllReduceStartThunk& thunk) {
+  auto collective_stream_id = xla::gpu::GetCollectiveStreamId(
+      thunk.async_events() != nullptr);
+  auto nvshmem_execution_stream_id = ExecutionStreamId(
+      thunk.execution_stream_id().value() + collective_stream_id.value());
+
+  return std::make_unique<NvshmemAllReduceCmd>(
+      nvshmem_execution_stream_id, thunk.execution_stream_id(),
+      thunk.config(), thunk.reduction_kind(), thunk.buffers());
+}
+
 static absl::StatusOr<Command> Convert(const ReduceScatterStartThunk& thunk) {
   return std::make_unique<ReduceScatterCmd>(
       thunk.config(), thunk.reduction_kind(), thunk.buffers(),
@@ -291,6 +316,8 @@ static absl::Status AppendCommands(CommandBufferCmdSequence& cmd_sequence,
       return append(Convert<ReduceScatterStartThunk>(thunk));
     case Thunk::Kind::kAllToAllStart:
       return append(Convert<AllToAllStartThunk>(thunk));
+    case Thunk::Kind::kNvshmemAllReduceStart:
+      return append(Convert<NvshmemAllReduceStartThunk>(thunk));
     case Thunk::Kind::kPartitionId:
       return append(Convert<PartitionIdThunk>(thunk));
     case Thunk::Kind::kReplicaId:
@@ -311,6 +338,7 @@ static absl::Status AppendCommands(CommandBufferCmdSequence& cmd_sequence,
 
     case Thunk::Kind::kAllGatherDone:
     case Thunk::Kind::kAllReduceDone:
+    case Thunk::Kind::kNvshmemAllReduceDone:
     case Thunk::Kind::kReduceScatterDone:
     case Thunk::Kind::kAllToAllDone:
       if (options.synchronization_mode ==

@@ -150,6 +150,14 @@ static bool IsAsyncStartCommand(const HloInstruction* hlo,
                                 const CommandBufferConfig& config) {
   if (HloPredicateIsOp<HloOpcode::kAllReduceStart, HloOpcode::kAllGatherStart>(
           hlo)) {
+    // Check if this is an NVSHMEM collective operation
+    auto gpu_config = hlo->backend_config<GpuBackendConfig>();
+    if (gpu_config.ok() && gpu_config->has_collective_backend_config()) {
+      const auto& collective_config = gpu_config->collective_backend_config();
+      if (collective_config.backend() == CollectiveBackendConfig::NVSHMEM) {
+        return true;
+      }
+    }
     return config.enabled_commands.contains(DebugOptions::COLLECTIVES);
   }
 
@@ -168,6 +176,15 @@ static bool IsAsyncDoneCommand(const HloInstruction* hlo,
                                const CommandBufferConfig& config) {
   if (HloPredicateIsOp<HloOpcode::kAllReduceDone, HloOpcode::kAllGatherDone>(
           hlo)) {
+    // Check if this is an NVSHMEM collective operation -- the done instruction doesn't have its own backend config, so we need to check the start instruction
+    const HloInstruction* start_instr = hlo->operand(0);
+    auto gpu_config = start_instr->backend_config<GpuBackendConfig>();
+    if (gpu_config.ok() && gpu_config->has_collective_backend_config()) {
+      const auto& collective_config = gpu_config->collective_backend_config();
+      if (collective_config.backend() == CollectiveBackendConfig::NVSHMEM) {
+        return true;
+      }
+    }
     return config.enabled_commands.contains(DebugOptions::COLLECTIVES);
   }
 
