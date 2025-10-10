@@ -297,6 +297,7 @@ limitations under the License.
 #include "xla/service/select_and_scatter_expander.h"
 #include "xla/service/sharding_remover.h"
 #include "xla/service/slow_operation_alarm.h"
+#include "xla/service/spmd/memory_aware_collective_cse.h"
 #include "xla/service/spmd/schedule_aware_collective_ops_cse.h"
 #include "xla/service/spmd/shardy/shardy_xla_pass.h"
 #include "xla/service/topk_rewriter.h"
@@ -1117,6 +1118,8 @@ absl::Status RunCollectiveOptimizationPasses(
 
   collectives_pipeline.AddPass<AllGatherBroadcastReorder>();
   collectives_pipeline.AddPass<AllGatherRemoveDegenerateDims>();
+
+  collectives_pipeline.AddPass<MemoryAwareCollectiveCSE>();
 
   if (debug_options.xla_gpu_experimental_collective_cse_distance_threshold() >
       0) {

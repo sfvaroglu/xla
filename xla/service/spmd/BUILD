@@ -229,6 +229,42 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "memory_aware_collective_cse",
+    srcs = ["memory_aware_collective_cse.cc"],
+    hdrs = ["memory_aware_collective_cse.h"],
+    deps = [
+        "//xla:shape_util",
+        "//xla:status_macros",
+        "//xla/hlo/analysis:hlo_alias_analysis",
+        "//xla/hlo/ir:hlo",
+        "//xla/hlo/pass:hlo_pass",
+        "//xla/tsl/platform:errors",
+        "//xla/tsl/platform:statusor",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+xla_cc_test(
+    name = "memory_aware_collective_cse_test",
+    srcs = ["memory_aware_collective_cse_test.cc"],
+    deps = [
+        ":memory_aware_collective_cse",
+        "//xla/hlo/ir:hlo",
+        "//xla/hlo/parser:hlo_parser",
+        "//xla/hlo/pass:hlo_pass_pipeline",
+        "//xla/hlo/testlib:hlo_hardware_independent_test_base",
+        "//xla/tests:xla_internal_test_main",
+        "//xla/tsl/platform:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
 xla_cc_test(
     name = "spmd_prepare_test",
     srcs = ["spmd_prepare_test.cc"],

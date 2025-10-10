@@ -86,6 +86,12 @@ HloInstruction* MayConsiderCollective(HloInstruction* hlo, bool for_replicas) {
   if (coll->opcode() == HloOpcode::kAllGather) {
     return coll;
   }
+  if (coll->opcode() == HloOpcode::kAllToAll) {
+    return coll;
+  }
+  if (coll->opcode() == HloOpcode::kReduceScatter) {
+    return coll;
+  }
   // Consider broadcast -> dynamic-update-slice -> all-reduce as all-gather.
   if (coll->opcode() == HloOpcode::kAllReduce && coll->shape().IsArray()) {
     auto operand = coll->operand(0);
