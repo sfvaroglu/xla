@@ -1811,6 +1811,7 @@ cc_library(
         "//xla/service/llvm_ir:llvm_command_line_options",
         "//xla/service/llvm_ir:llvm_util",
         "//xla/service/spmd:collective_permute_motion",
+        "//xla/service/spmd:memory_aware_collective_cse",
         "//xla/service/spmd:schedule_aware_collective_ops_cse",
         "//xla/service/spmd/shardy:shardy_xla_pass",
         "//xla/stream_executor:device_description",
