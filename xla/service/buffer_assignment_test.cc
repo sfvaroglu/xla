@@ -4205,5 +4205,138 @@ TEST(ComputePeakMemoryTest, LargeResult) {
   EXPECT_EQ(*ComputePeakMemory(proto), 1LL << 33);
 }
 
+// Test demonstrating that scan (while loops) enables buffer reuse while
+// unrolled layers do not reuse intermediate activation buffers.
+TEST_F(BufferAssignmentTest, ScanLayersBufferReuse) {
+  // Test that while-loop based layer iteration (scan_layers=true) reuses
+  // buffers, while unrolled layers (scan_layers=false) require separate
+  // buffers for each intermediate activation.
+  
+  // HLO with while loop (scan-based)
+  const char* scan_hlo = R"(
+HloModule scan_layers
+
+body {
+  param = (s32[], f32[512,2048], f32[2048,2048]) parameter(0)
+  counter = s32[] get-tuple-element(param), index=0
+  activations = f32[512,2048] get-tuple-element(param), index=1
+  weights = f32[2048,2048] get-tuple-element(param), index=2
+  
+  matmul = f32[512,2048] dot(activations, weights),
+    lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  layer_out = f32[512,2048] tanh(matmul)
+  
+  one = s32[] constant(1)
+  next_counter = s32[] add(counter, one)
+  ROOT result = (s32[], f32[512,2048], f32[2048,2048]) tuple(next_counter, layer_out, weights)
+}
+
+condition {
+  param = (s32[], f32[512,2048], f32[2048,2048]) parameter(0)
+  counter = s32[] get-tuple-element(param), index=0
+  limit = s32[] constant(4)
+  ROOT result = pred[] compare(counter, limit), direction=LT
+}
+
+ENTRY main {
+  init = f32[512,2048] parameter(0)
+  weights = f32[2048,2048] parameter(1)
+  zero = s32[] constant(0)
+  init_tuple = (s32[], f32[512,2048], f32[2048,2048]) tuple(zero, init, weights)
+  loop = (s32[], f32[512,2048], f32[2048,2048]) while(init_tuple),
+    condition=condition, body=body
+  ROOT out = f32[512,2048] get-tuple-element(loop), index=1
+}
+)";
+
+  // HLO with unrolled layers
+  const char* unroll_hlo = R"(
+HloModule unroll_layers
+
+ENTRY main {
+  init = f32[512,2048] parameter(0)
+  weights = f32[2048,2048] parameter(1)
+  
+  mm0 = f32[512,2048] dot(init, weights),
+    lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  l0 = f32[512,2048] tanh(mm0)
+  
+  mm1 = f32[512,2048] dot(l0, weights),
+    lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  l1 = f32[512,2048] tanh(mm1)
+  
+  mm2 = f32[512,2048] dot(l1, weights),
+    lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  l2 = f32[512,2048] tanh(mm2)
+  
+  mm3 = f32[512,2048] dot(l2, weights),
+    lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  ROOT l3 = f32[512,2048] tanh(mm3)
+}
+)";
+
+  LOG(INFO) << "Parsing SCAN HLO module...";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> scan_module,
+                          ParseAndReturnUnverifiedModule(scan_hlo));
+  LOG(INFO) << "Scan module parsed. Instructions: " 
+            << scan_module->instruction_count();
+  
+  LOG(INFO) << "Parsing UNROLL HLO module...";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> unroll_module,
+                          ParseAndReturnUnverifiedModule(unroll_hlo));
+  LOG(INFO) << "Unroll module parsed. Instructions: " 
+            << unroll_module->instruction_count();
+  
+  // Run buffer assignment on both
+  LOG(INFO) << "\n=== Running Buffer Assignment for SCAN module ===";
+  std::unique_ptr<BufferAssignment> scan_assignment =
+      RunBufferAssignment(scan_module.get());
+  LOG(INFO) << "Scan buffer assignment complete";
+
+  LOG(INFO) << "\n=== Running Buffer Assignment for UNROLL module ===";
+  std::unique_ptr<BufferAssignment> unroll_assignment =
+      RunBufferAssignment(unroll_module.get());
+  LOG(INFO) << "Unroll buffer assignment complete";
+  
+  // Calculate peak memory for both
+  LOG(INFO) << "\n=== SCAN (while loop) Configuration ===";
+  LOG(INFO) << "Number of allocations: " << scan_assignment->Allocations().size();
+  int64_t scan_peak = 0;
+  for (const auto& allocation : scan_assignment->Allocations()) {
+    LOG(INFO) << "  Allocation " << allocation.index() 
+              << ": size=" << allocation.size() 
+              << " bytes, color=" << allocation.color();
+    scan_peak += allocation.size();
+  }
+  LOG(INFO) << "Scan TOTAL memory: " << scan_peak << " bytes";
+  
+  LOG(INFO) << "\n=== UNROLL Configuration ===";
+  LOG(INFO) << "Number of allocations: " << unroll_assignment->Allocations().size();
+  int64_t unroll_peak = 0;
+  for (const auto& allocation : unroll_assignment->Allocations()) {
+    LOG(INFO) << "  Allocation " << allocation.index() 
+              << ": size=" << allocation.size() 
+              << " bytes, color=" << allocation.color();
+    unroll_peak += allocation.size();
+  }
+  LOG(INFO) << "Unroll TOTAL memory: " << unroll_peak << " bytes";
+  
+  LOG(INFO) << "\n=== COMPARISON ===";
+  LOG(INFO) << "Scan peak memory: " << scan_peak << " bytes";
+  LOG(INFO) << "Unroll peak memory: " << unroll_peak << " bytes";
+  LOG(INFO) << "Memory difference: " << (unroll_peak - scan_peak) << " bytes";
+  LOG(INFO) << "Memory ratio: " << (float)unroll_peak / scan_peak << "x";
+  
+  // ASSERTION: Unrolled version should use more peak memory because
+  // intermediate layer buffers cannot be reused. While loops enable
+  // explicit buffer aliasing through loop-carried state.
+  EXPECT_GT(unroll_peak, scan_peak)
+      << "Unrolled layers should use more peak memory due to lack of buffer "
+      << "reuse. Scan uses while loops which enable buffer reuse through "
+      << "loop-carried state, while unrolled code requires separate buffers "
+      << "for each layer's activations. This is the root cause of OOM when "
+      << "scan_layers=false in production transformers.";
+}
+
 }  // namespace
 }  // namespace xla

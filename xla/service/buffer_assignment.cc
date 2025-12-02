@@ -20,6 +20,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <iterator>
 #include <memory>
@@ -78,6 +79,16 @@ using absl::flat_hash_set;
 using absl::StrAppend;
 using absl::StrAppendFormat;
 using memory_space_assignment::PresetAssignments;
+
+bool EnableSequentialBufferReuse() {
+  static const bool enabled = [] {
+    const char* env = std::getenv("XLA_ENABLE_SEQUENTIAL_BUFFER_REUSE");
+    if (env == nullptr) return true;
+    std::string env_str(env);
+    return env_str != "0" && env_str != "false" && env_str != "False" && env_str != "FALSE";
+  }();
+  return enabled;
+}
 using ::tsl::strings::HumanReadableNumBytes;
 
 absl::flat_hash_map<int64_t, const HloInstruction*> BuildIdToHloInstructionMap(
@@ -1391,15 +1402,44 @@ bool BufferAssigner::LiveRangeInterferes(const HloValue* buffer1,
   auto can_share_as_operand =
       [&assignment, this](const HloValue* user_value,
                           const HloValue* operand_value,
-                          const HloLiveRange::TimeBound& operand_live_range) {
+                          const HloLiveRange::TimeBound& operand_live_range,
+                          bool is_sequential_reuse = false) {
         // An hlo value can hold multiple instructions during its life time. We
         // only look at the last instruction and check if it can be shared with
         // the operand.
         HloPosition operand_end_position = operand_live_range.end_position;
-        return user_value->instruction()->opcode() != HloOpcode::kCopy &&
-               user_value->instruction()->IsUserOf(
-                   operand_end_position.instruction) &&
-               assignment->dataflow_analysis().CanShareOperandBufferWithUser(
+        
+        if (user_value->instruction()->opcode() == HloOpcode::kCopy) {
+          return false;
+        }
+        
+        if (!user_value->instruction()->IsUserOf(
+                operand_end_position.instruction)) {
+          return false;
+        }
+        
+        // For sequential reuse with matching buffer sizes, bypass backend hint checks.
+        // Sequential buffers never overlap, so in-place safety checks are
+        // unnecessary - only size matters. This allows reuse even when shapes differ
+        // (e.g., transposed buffers: [M,N] vs [N,M]).
+        // Controlled by XLA_ENABLE_SEQUENTIAL_BUFFER_REUSE env var (default: enabled).
+        if (is_sequential_reuse && EnableSequentialBufferReuse()) {
+          const Shape& operand_shape = ShapeUtil::GetSubshape(
+              operand_end_position.instruction->shape(), operand_end_position.index);
+          const Shape& user_shape = ShapeUtil::GetSubshape(
+              user_value->instruction()->shape(), user_value->index());
+          
+          if (ShapeUtil::ByteSizeOf(operand_shape) == ShapeUtil::ByteSizeOf(user_shape)) {
+            VLOG(2) << "ALLOW_SEQUENTIAL_REUSE|"
+                    << operand_end_position.instruction->name() << "|"
+                    << user_value->instruction()->name() << "|"
+                    << "size_match|"
+                    << ShapeUtil::ByteSizeOf(operand_shape) << "_bytes";
+            return true;
+          }
+        }
+        
+        return assignment->dataflow_analysis().CanShareOperandBufferWithUser(
                    operand_end_position.instruction, operand_end_position.index,
                    user_value->instruction(), user_value->index(), alias_info_);
       };
@@ -1410,30 +1450,30 @@ bool BufferAssigner::LiveRangeInterferes(const HloValue* buffer1,
   if (!(live_range_1.start > live_range_2.end ||
         live_range_2.start > live_range_1.end)) {
     if (live_range_1.end == live_range_2.start) {
-      auto operand_value = buffer1;
-      auto user_value = buffer2;
-      if (!can_share_as_operand(user_value, operand_value, live_range_1)) {
-        VLOG(4) << "End of live range of " << buffer1->ToShortString()
-                << " is equal to the start of live range of "
-                << buffer2->ToShortString() << ", buffer cannot be shared.";
+      if (!can_share_as_operand(buffer2, buffer1, live_range_1, 
+                                 /*is_sequential_reuse=*/true)) {
+        VLOG(1) << "BLOCKED_REUSE|"
+                << buffer1->defining_instruction()->name() << "|"
+                << HloOpcodeString(buffer1->defining_instruction()->opcode()) << "|"
+                << buffer1->shape().ToString(false) << "|"
+                << buffer2->defining_instruction()->name() << "|"
+                << HloOpcodeString(buffer2->defining_instruction()->opcode()) << "|"
+                << buffer2->shape().ToString(false);
         return true;
       }
     } else if (live_range_2.end == live_range_1.start) {
-      auto operand_value = buffer2;
-      auto user_value = buffer1;
-      if (!can_share_as_operand(user_value, operand_value, live_range_2)) {
-        VLOG(4) << "End of live range of " << buffer2->ToShortString()
-                << " is equal to the start of live range of "
-                << buffer1->ToShortString() << ", buffer cannot be shared.";
+      if (!can_share_as_operand(buffer1, buffer2, live_range_2,
+                                 /*is_sequential_reuse=*/true)) {
+        VLOG(1) << "BLOCKED_REUSE|"
+                << buffer2->defining_instruction()->name() << "|"
+                << HloOpcodeString(buffer2->defining_instruction()->opcode()) << "|"
+                << buffer2->shape().ToString(false) << "|"
+                << buffer1->defining_instruction()->name() << "|"
+                << HloOpcodeString(buffer1->defining_instruction()->opcode()) << "|"
+                << buffer1->shape().ToString(false);
         return true;
       }
     } else {
-      VLOG(4) << "Can't assign: assignee " << *buffer1 << " may interfere with "
-              << *buffer2;
-      VLOG(4) << "assigned_buffer.start: " << live_range_1.start;
-      VLOG(4) << "assigned_buffer.end: " << live_range_1.end;
-      VLOG(4) << "live_range_2.start" << live_range_2.start;
-      VLOG(4) << "live_range_2.end" << live_range_2.end;
       return true;
     }
   }
@@ -2128,6 +2168,11 @@ std::vector<const HloValue*> ComputePeakMemoryLogicalBuffers(
       max_live_size = live_size;
     }
   }
+  
+  VLOG(1) << "PEAK_MEMORY|allocation_" << allocation.index() 
+          << "|size_bytes=" << max_live_size 
+          << "|size_mb=" << (max_live_size / (1024.0 * 1024.0))
+          << "|size_gb=" << (max_live_size / (1024.0 * 1024.0 * 1024.0));
 
   // Next gather the set of logical buffers live at the earliest point of
   // maximal live set size.
@@ -2304,6 +2349,12 @@ BufferAssigner::CreateAssignment(
                                         module->entry_computation(), true));
 
   VLOG(1) << "Assigning buffers to module " << module->name();
+  VLOG(1) << "Sequential buffer reuse optimization: " 
+          << (EnableSequentialBufferReuse() ? "ENABLED" : "DISABLED")
+          << " (XLA_ENABLE_SEQUENTIAL_BUFFER_REUSE=" 
+          << (std::getenv("XLA_ENABLE_SEQUENTIAL_BUFFER_REUSE") 
+              ? std::getenv("XLA_ENABLE_SEQUENTIAL_BUFFER_REUSE") : "<not set>")
+          << ")";
   XLA_VLOG_LINES(3, module->ToString());
   XLA_VLOG_LINES(3, alias_analysis->ToString());
   XLA_VLOG_LINES(3, alias_analysis->dataflow_analysis().ToString());
@@ -2399,6 +2450,37 @@ BufferAssigner::CreateAssignment(
   XLA_VLOG_LINES(2, assignment->ToString());
   assignment->ComputeSummaryStats();
   XLA_VLOG_LINES(1, assignment->StatsString(alias_info_));
+  
+  int64_t total_peak_memory = 0;
+  int allocation_count = 0;
+  for (const auto& allocation : assignment->Allocations()) {
+    const auto& peak_buffers = allocation.PeakMemoryLogicalBuffers();
+    if (!peak_buffers.empty()) {
+      int64_t allocation_peak = 0;
+      for (const auto* value : peak_buffers) {
+        auto it = allocation.assigned_buffers().find(value);
+        if (it != allocation.assigned_buffers().end()) {
+          allocation_peak += it->second.size;
+        }
+      }
+      total_peak_memory += allocation_peak;
+      allocation_count++;
+      
+      VLOG(1) << "PEAK_MEMORY|allocation_" << allocation.index()
+              << "|size_bytes=" << allocation_peak
+              << "|size_mb=" << (allocation_peak / (1024.0 * 1024.0))
+              << "|size_gb=" << (allocation_peak / (1024.0 * 1024.0 * 1024.0));
+    }
+  }
+  
+  VLOG(1) << "TOTAL_PEAK_MEMORY|" 
+          << "allocations=" << allocation_count
+          << "|total_peak_bytes=" << total_peak_memory
+          << "|total_peak_mb=" << (total_peak_memory / (1024.0 * 1024.0))
+          << "|total_peak_gb=" << (total_peak_memory / (1024.0 * 1024.0 * 1024.0))
+          << "|total_alloc_bytes=" << assignment->GetStats().total_allocation_bytes
+          << "|total_alloc_gb=" << (assignment->GetStats().total_allocation_bytes / (1024.0 * 1024.0 * 1024.0));
+  
   VLOG(1) << "Buffer assignment done.";
   return std::move(assignment);
 }

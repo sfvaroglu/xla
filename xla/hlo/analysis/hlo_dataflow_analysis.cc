@@ -1623,6 +1623,7 @@ bool HloDataflowAnalysis::CanShareOperandBufferWithUser(
   CHECK(user->IsUserOf(operand))
       << "user: " << user->ToString() << " operand: " << operand->ToString();
   if (operand->opcode() == HloOpcode::kConstant) {
+    VLOG(1) << "REJECT_REASON|constant";
     return false;
   }
 
@@ -1671,10 +1672,16 @@ bool HloDataflowAnalysis::CanShareOperandBufferWithUser(
 
   if (std::optional<bool> hint =
           alias_info->MayAlias(operand, operand_index, user, user_index)) {
+    if (!*hint) {
+      VLOG(1) << "REJECT_REASON|backend_hint";
+    }
     return *hint;
   }
 
   if (!shapes_equal) {
+    VLOG(1) << "REJECT_REASON|shapes_not_equal|"
+            << operand_subshape.ToString(false) << "|"
+            << user_subshape.ToString(false);
     return false;
   }
 
@@ -1685,7 +1692,11 @@ bool HloDataflowAnalysis::CanShareOperandBufferWithUser(
         GetValueDefinedAt(fusion_param, operand_index);
 
     if (user->IsLoopFusion() || user->IsInputFusion()) {
-      return AreTransitiveUsesElementwiseOrTuple(fusion_param);
+      auto result = AreTransitiveUsesElementwiseOrTuple(fusion_param);
+      if (!result) {
+        VLOG(1) << "REJECT_REASON|fusion_not_elementwise";
+      }
+      return result;
     }
 
     if (user->IsOutputFusion() &&
@@ -1700,6 +1711,7 @@ bool HloDataflowAnalysis::CanShareOperandBufferWithUser(
                    operand->opcode() == HloOpcode::kDot;
           });
       if (add_operand_it == add->operands().end()) {
+        VLOG(1) << "REJECT_REASON|output_fusion_no_dot_conv";
         return false;
       }
       auto* matched_add_operand = *add_operand_it;
@@ -1711,9 +1723,14 @@ bool HloDataflowAnalysis::CanShareOperandBufferWithUser(
       // index 'other_add_operand_index').
       if (fusion_param_value.GetUses().size() == 1) {
         const HloUse& use = fusion_param_value.GetUses()[0];
-        return use.instruction == user->fused_expression_root() &&
-               use.operand_number == other_add_operand_index;
+        bool result = use.instruction == user->fused_expression_root() &&
+                      use.operand_number == other_add_operand_index;
+        if (!result) {
+          VLOG(1) << "REJECT_REASON|output_fusion_wrong_operand";
+        }
+        return result;
       }
+      VLOG(1) << "REJECT_REASON|output_fusion_multiple_uses";
       return false;
     }
   }
@@ -1738,11 +1755,16 @@ bool HloDataflowAnalysis::CanShareOperandBufferWithUser(
     // so here we just need to check that the use is at the right operand index.
     const auto operand_indices = user->OperandIndices(operand);
     int64_t operand_no = user->opcode() == HloOpcode::kTriangularSolve ? 1 : 0;
-    return operand_indices.size() == 1 && operand_indices[0] == operand_no;
+    bool result = operand_indices.size() == 1 && operand_indices[0] == operand_no;
+    if (!result) {
+      VLOG(1) << "REJECT_REASON|dus_scatter_wrong_operand";
+    }
+    return result;
   }
   if (user->opcode() == HloOpcode::kSort) {
     // Only valid if there are no other users.
     if (operand->users().size() != 1) {
+      VLOG(1) << "REJECT_REASON|sort_multiple_users";
       return false;
     }
     // If we only sort keys, the output of sort is not a tuple, so we can always
@@ -1753,7 +1775,11 @@ bool HloDataflowAnalysis::CanShareOperandBufferWithUser(
     CHECK(!user_index.empty());
     // Only share with the right tuple element buffer.
     const auto operand_indices = user->OperandIndices(operand);
-    return operand_indices.size() == 1 && user_index[0] == operand_indices[0];
+    bool result = operand_indices.size() == 1 && user_index[0] == operand_indices[0];
+    if (!result) {
+      VLOG(1) << "REJECT_REASON|sort_wrong_tuple_element";
+    }
+    return result;
   }
   if (user->opcode() == HloOpcode::kCall) {
     // Get all uses of value defined by 'operand' at 'operand_index'.
@@ -1776,12 +1802,20 @@ bool HloDataflowAnalysis::CanShareOperandBufferWithUser(
           return use.instruction == callee_root &&
                  callee_root->IsElementwiseOnOperand(use.operand_number);
         }) != uses.end();
-    return uses.size() == 2 && found_caller_use && found_elementwise_callee_use;
+    bool result = uses.size() == 2 && found_caller_use && found_elementwise_callee_use;
+    if (!result) {
+      VLOG(1) << "REJECT_REASON|call_not_elementwise_root";
+    }
+    return result;
   }
 
   // Loop fusions that contain transposing copies won't reach here as they have
   // different layouts, which fails the check in the beginning of this function.
-  return user->IsElementwiseOnOperand(user->operand_index(operand));
+  auto result = user->IsElementwiseOnOperand(user->operand_index(operand));
+  if (!result) {
+    VLOG(1) << "REJECT_REASON|not_elementwise_on_operand";
+  }
+  return result;
 }
 
 }  // namespace xla
