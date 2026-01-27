@@ -38,6 +38,7 @@ git checkout nv-staging/nv-scale-training/staging
 | PR | Description | Status |
 |----|-------------|--------|
 | [#26196](https://github.com/openxla/xla/pull/26196) | Add LHS config to prioritize compute nodes over collective starts | In review |
+| [#33269](https://github.com/openxla/xla/pull/33269) | Add flag to control async compute resource limitation | In review |
 
 **Note:** This branch may be force-pushed when rebased on upstream.
 
