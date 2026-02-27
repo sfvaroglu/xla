@@ -790,7 +790,7 @@ message DebugOptions {
   // computations to execute concurrently. In host-offloading experiments,
   // increasing this value effectively overlaps device-to-host (D2H) transfers
   // with other computations, resulting in improved performance.
-  optional int32 xla_gpu_experimental_parallel_async_compute_limit = 455;
+  optional int32 xla_gpu_experimental_parallel_async_compute_limit = 457;
 
   optional PipelineParallelismOptLevel
       xla_gpu_experimental_pipeline_parallelism_opt_level = 351;
