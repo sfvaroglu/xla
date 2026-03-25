@@ -31,6 +31,7 @@ ncclGroupSimulateEnd
 ncclGroupStart
 ncclMemAlloc
 ncclMemFree
+ncclPutSignal
 ncclRecv
 ncclRedOpCreatePreMulSum
 ncclRedOpDestroy
@@ -38,6 +39,7 @@ ncclReduce
 ncclReduceScatter
 ncclResetDebugInit
 ncclSend
+ncclWaitSignal
 pncclAllGather
 pncclAllReduce
 pncclBcast
@@ -68,6 +70,7 @@ pncclGroupSimulateEnd
 pncclGroupStart
 pncclMemAlloc
 pncclMemFree
+pncclPutSignal
 pncclRecv
 pncclRedOpCreatePreMulSum
 pncclRedOpDestroy
@@ -75,3 +78,4 @@ pncclReduce
 pncclReduceScatter
 pncclResetDebugInit
 pncclSend
+pncclWaitSignal

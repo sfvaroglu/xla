@@ -33,6 +33,7 @@ class NcclSymmetricMemory final : public SymmetricMemory {
       ncclComm_t comm, stream_executor::DeviceAddressBase addr);
 
   stream_executor::DeviceAddressBase addr() const { return addr_; }
+  ncclWindow_t win() const { return win_; }
 
   std::string ToString() const final;
 

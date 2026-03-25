@@ -96,6 +96,10 @@ struct RaggedAllToAllStreamState {
   // Peers write specific slots in this array to signal this device.
   se::DeviceAddressHandle barrier_signal_buffer;
 
+  // Symmetric memory handler for the output data buffer,
+  // used for the NCCL one-sided put path.
+  std::shared_ptr<xla::SymmetricMemory> output_symmetric_memory;
+
   // MultiGpuBarrier: Device memory for the current local step counter.
   // This value is incremented locally by the kernel after every barrier.
   se::DeviceAddressHandle barrier_signal_value;
@@ -236,7 +240,8 @@ absl::Status RunRaggedAllToAll(
     const std::vector<DeviceBufferPair>& original_buffers, se::Stream& stream,
     Communicator& comm, absl::Span<int64_t* const> ragged_metadata_allocs,
     const se::DeviceAddressBase& output_offsets_device_buffer,
-    bool use_symmetric_buffer);
+    bool use_symmetric_buffer,
+    SymmetricMemory* output_symmetric_memory = nullptr);
 
 // Executes an optimized "One-Shot" Ragged All-to-All collective.
 //
