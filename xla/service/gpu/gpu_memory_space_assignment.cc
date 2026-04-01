@@ -49,6 +49,7 @@ const absl::NoDestructor<absl::flat_hash_set<HloOpcode>>
         HloOpcode::kCollectivePermuteStart,
         HloOpcode::kCollectivePermuteDone,
         HloOpcode::kAllToAll,
+        HloOpcode::kRaggedAllToAll,
     });
 
 bool IsNvshmemInstruction(const HloInstruction* inst) {

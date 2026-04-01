@@ -54,6 +54,7 @@ using ::testing::NotNull;
 
 enum class RaggedAllToAllImplType {
   kNccl,
+  kNcclPut,
   kDecomposer,
   kOneShot,
   kOneShotWithMultiGpuBarrier,
@@ -62,9 +63,11 @@ enum class RaggedAllToAllImplType {
 class RaggedAllToAllTestBase : public CollectiveOpsWithFlagsBase {
  public:
   RaggedAllToAllTestBase(bool enable_async, RaggedAllToAllImplType impl_type)
-      : CollectiveOpsWithFlagsBase(enable_async, /*enable_p2p_memcpy=*/false,
-                                   /*memory_size=*/64 * kMB,
-                                   /*collectives_memory_size=*/0),
+      : CollectiveOpsWithFlagsBase(
+            enable_async, /*enable_p2p_memcpy=*/false,
+            /*memory_size=*/64 * kMB,
+            /*collectives_memory_size=*/
+            impl_type == RaggedAllToAllImplType::kNcclPut ? 64 * kMB : 0),
         impl_type_(impl_type) {}
 
   // Creates random test data for a ragged-all-to-all.
@@ -234,6 +237,10 @@ class RaggedAllToAllTestBase : public CollectiveOpsWithFlagsBase {
     if (impl_type_ == RaggedAllToAllImplType::kOneShotWithMultiGpuBarrier) {
       opts.set_xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel(true);
       opts.set_xla_gpu_experimental_ragged_all_to_all_use_barrier(true);
+    }
+    if (impl_type_ == RaggedAllToAllImplType::kNcclPut) {
+      opts.set_xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel(false);
+      opts.set_xla_gpu_experimental_enable_nccl_symmetric_buffers(true);
     }
     return opts;
   }
@@ -420,6 +427,10 @@ TEST_P(RaggedAllToAllTest, RaggedAllToAll_2GPUs_CommandBuffer) {
 }
 
 TEST_P(RaggedAllToAllTest, RaggedAllToAll_2GPUs_S4) {
+  if (impl_type_ == RaggedAllToAllImplType::kNcclPut) {
+    GTEST_SKIP() << "S4 buffers do not meet NCCL symmetric window alignment "
+                    "requirements.";
+  }
   absl::string_view kModuleReplicatedStr = R"(
   HloModule module, num_partitions=1
 
@@ -670,6 +681,10 @@ TEST_P(RaggedAllToAllTest, RaggedAllToAll_2GPUs_Degenerate) {
 }
 
 TEST_P(RaggedAllToAllTest, RaggedAllToAll_2GPUs_NonDefaultLayout) {
+  if (impl_type_ == RaggedAllToAllImplType::kNcclPut) {
+    GTEST_SKIP() << "Non-default layout buffers do not meet NCCL symmetric "
+                    "window alignment requirements.";
+  }
   absl::string_view kModuleReplicatedStr = R"(
   HloModule module
 
@@ -895,6 +910,8 @@ std::string RaggedAllToAllImplTypeName(
   switch (ragged_all_to_all_impl_type) {
     case RaggedAllToAllImplType::kNccl:
       return "nccl";
+    case RaggedAllToAllImplType::kNcclPut:
+      return "nccl_put";
     case RaggedAllToAllImplType::kDecomposer:
       return "decomposer";
     case RaggedAllToAllImplType::kOneShot:
@@ -911,6 +928,7 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Combine(
         ::testing::Bool(),
         ::testing::Values(RaggedAllToAllImplType::kNccl,
+                          RaggedAllToAllImplType::kNcclPut,
                           RaggedAllToAllImplType::kDecomposer,
                           RaggedAllToAllImplType::kOneShot,
                           RaggedAllToAllImplType::kOneShotWithMultiGpuBarrier)),

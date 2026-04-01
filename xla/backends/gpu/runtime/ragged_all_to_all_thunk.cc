@@ -430,9 +430,13 @@ absl::Status RaggedAllToAllStartThunk::Initialize(
         ConvertToDeviceBuffers(params.buffer_allocations, buffers_,
                                config_.config.operand_element_type));
 
+    const se::DeviceAddressBase& input_buffer =
+        device_buffers[0].source_buffer;
     const se::DeviceAddressBase& output_buffer =
         device_buffers[1].destination_buffer;
 
+    ASSIGN_OR_RETURN(state->input_symmetric_memory,
+                     comm->CreateSymmetricMemory(input_buffer));
     ASSIGN_OR_RETURN(state->output_symmetric_memory,
                      comm->CreateSymmetricMemory(output_buffer));
   }
@@ -632,6 +636,8 @@ absl::Status RunRaggedAllToAll(
       use_symmetric_buffer && output_symmetric_memory != nullptr;
 
   if (!use_put_path) {
+    RETURN_IF_ERROR(MaybeRegisterBuffers(stream.parent(), buffers, &comm,
+                                         /*use_symmetric_buffer=*/false));
     // `output_offsets` of the RaggedAllToAll instruction are sharded in a way,
     // that `output_offset[i]` is an offset in the i-th peer output buffer. To
     // make it work for NCCL model with send/recv, we need to know offsets in the
