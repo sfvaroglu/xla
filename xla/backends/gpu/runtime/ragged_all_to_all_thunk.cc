@@ -430,15 +430,18 @@ absl::Status RaggedAllToAllStartThunk::Initialize(
         ConvertToDeviceBuffers(params.buffer_allocations, buffers_,
                                config_.config.operand_element_type));
 
-    const se::DeviceAddressBase& input_buffer =
-        device_buffers[0].source_buffer;
     const se::DeviceAddressBase& output_buffer =
         device_buffers[1].destination_buffer;
 
-    ASSIGN_OR_RETURN(state->input_symmetric_memory,
-                     comm->CreateSymmetricMemory(input_buffer));
+    ASSIGN_OR_RETURN(auto output_parent,
+                     params.executor->GetMemoryRange(output_buffer));
+
+    state->output_base_offset =
+        reinterpret_cast<uintptr_t>(output_buffer.opaque()) -
+        reinterpret_cast<uintptr_t>(output_parent.opaque());
+
     ASSIGN_OR_RETURN(state->output_symmetric_memory,
-                     comm->CreateSymmetricMemory(output_buffer));
+                     comm->CreateSymmetricMemory(output_parent));
   }
 
   return absl::OkStatus();
@@ -580,7 +583,7 @@ absl::Status RaggedAllToAllStartThunk::RunCollective(
                            device_buffers, stream, comm, ragged_metadata_allocs,
                            state->output_offsets_device_buffer.address(),
                            config_.config.use_symmetric_buffer,
-                           output_sym_mem);
+                           output_sym_mem, state->output_base_offset);
 }
 
 // Executes the rendezvous to exchange buffer addresses and barrier signal
@@ -622,7 +625,8 @@ absl::Status RunRaggedAllToAll(
     const std::vector<DeviceBufferPair>& original_buffers, se::Stream& stream,
     Communicator& comm, absl::Span<int64_t* const> ragged_metadata_allocs,
     const se::DeviceAddressBase& output_offsets_device_buffer,
-    bool use_symmetric_buffer, SymmetricMemory* output_symmetric_memory) {
+    bool use_symmetric_buffer, SymmetricMemory* output_symmetric_memory,
+    size_t output_base_offset) {
   int device_ordinal = stream.parent()->device_ordinal();
   XLA_VLOG_DEVICE(3, device_ordinal)
       << "Performing ragged-all-to-all from device ordinal: " << device_ordinal;
@@ -668,7 +672,8 @@ absl::Status RunRaggedAllToAll(
     Future<> future = gpu_comm->GroupExecute(
         [num_updates_per_replica, num_ranks, input_offsets, send_sizes,
          output_offsets, ragged_row_element_size, element_type,
-         element_byte_width, &input_buffer, output_symmetric_memory,
+         element_byte_width, output_base_offset, &input_buffer,
+         output_symmetric_memory,
          &stream](GpuCommunicator* comm) -> absl::Status {
           for (int64_t i = 0; i < num_updates_per_replica; ++i) {
             for (int peer = 0; peer < num_ranks; ++peer) {
@@ -680,8 +685,9 @@ absl::Status RunRaggedAllToAll(
                   input_offsets[idx] * ragged_row_element_size, send_count);
 
               size_t byte_offset =
+                  output_base_offset +
                   output_offsets[idx] * ragged_row_element_size *
-                  element_byte_width;
+                      element_byte_width;
               size_t byte_count = send_count * element_byte_width;
 
               RETURN_IF_ERROR(comm->LaunchPut(

@@ -104,13 +104,14 @@ struct RaggedAllToAllStreamState {
   // peers.
   std::shared_ptr<std::vector<RaggedAllToAllRendezvousValue>> participants;
 
-  // Symmetric memory handler for the input data buffer,
-  // used for the NCCL one-sided put path.
-  std::shared_ptr<SymmetricMemory> input_symmetric_memory;
-
   // Symmetric memory handler for the output data buffer,
-  // used for the NCCL one-sided put path.
+  // used for the NCCL one-sided put path. Registered on the full parent
+  // allocation (not the sub-buffer) so that NCCL's CE accepts put operations.
   std::shared_ptr<SymmetricMemory> output_symmetric_memory;
+
+  // Byte offset of the output sub-buffer within the parent allocation that was
+  // registered as the symmetric window.
+  size_t output_base_offset = 0;
 
   RaggedAllToAllStreamState(int device_ordinal, RankId rank,
                             GpuCliqueKey clique_key)
@@ -245,7 +246,8 @@ absl::Status RunRaggedAllToAll(
     Communicator& comm, absl::Span<int64_t* const> ragged_metadata_allocs,
     const se::DeviceAddressBase& output_offsets_device_buffer,
     bool use_symmetric_buffer,
-    SymmetricMemory* output_symmetric_memory = nullptr);
+    SymmetricMemory* output_symmetric_memory = nullptr,
+    size_t output_base_offset = 0);
 
 // Executes an optimized "One-Shot" Ragged All-to-All collective.
 //

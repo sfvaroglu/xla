@@ -970,12 +970,6 @@ absl::Status NcclCommunicator::LaunchPut(se::DeviceAddressBase send_buffer,
 
   auto* nccl_sym = tsl::down_cast<NcclSymmetricMemory*>(recv_buffer);
 
-  VLOG(3) << absl::StreamFormat(
-      "[%d] Launch NCCL Put operation; send_buffer=%p; "
-      "recv_win=%p; offset=%d; count=%d; peer=%d; comm=%p; stream=%p",
-      stream->parent()->device_ordinal(), send_buffer.opaque(),
-      nccl_sym->win(), offset, count, peer.value(), comm_, stream);
-
 #if NCCL_VERSION_CODE >= 22900
   TF_RETURN_IF_ERROR(XLA_NCCL_STATUS(ncclPutSignal(
       send_buffer.opaque(), count, ncclChar, peer.value(), nccl_sym->win(),
@@ -1038,11 +1032,6 @@ absl::Status NcclCommunicator::LaunchWaitSignalAll(
     return FailedPrecondition("NcclCommunicator aborted");
   }
   se::Stream* stream = ToStream(executor);
-
-  VLOG(3) << absl::StreamFormat(
-      "[%d] Launch NCCL WaitSignalAll operation; num_peers=%d; op_cnt=%d; "
-      "comm=%p; stream=%p",
-      stream->parent()->device_ordinal(), peers.size(), op_cnt, comm_, stream);
 
 #if NCCL_VERSION_CODE >= 22900
   std::vector<ncclWaitSignalDesc_t> descs(peers.size());
