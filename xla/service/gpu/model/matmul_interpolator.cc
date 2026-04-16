@@ -40,6 +40,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/cublas_cudnn.h"
+#include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/model/hlo_op_profile.pb.h"
 #include "xla/service/gpu/model/hlo_op_profiles.h"
 #include "xla/service/gpu/model/interpolator.h"
@@ -84,11 +85,17 @@ struct InterpolationSpecificationFlops {
 };
 
 bool IsTritonGemm(const HloInstruction& instr) {
-  if (instr.called_computations().size() != 1) {
+  if (instr.opcode() != HloOpcode::kFusion ||
+      instr.called_computations().size() != 1) {
     return false;
   }
   if (!IsTritonFusedComputation(*instr.called_computations()[0])) {
-    return false;
+    auto config = instr.backend_config<GpuBackendConfig>();
+    if (!config.ok() ||
+        config->fusion_backend_config().kind() !=
+            kTritonNestedGemmFusionKind) {
+      return false;
+    }
   }
   auto fused_range = instr.fused_instructions();
   return absl::c_count_if(fused_range, HloPredicateIsOp<HloOpcode::kDot>) == 1;

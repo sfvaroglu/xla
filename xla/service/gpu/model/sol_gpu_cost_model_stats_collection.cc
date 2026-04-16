@@ -31,6 +31,7 @@ limitations under the License.
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/cublas_cudnn.h"
+#include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/gpu_hlo_schedule.h"
 #include "xla/service/gpu/gpu_latency_hiding_scheduler.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
@@ -43,11 +44,17 @@ namespace xla::gpu {
 namespace {
 
 bool IsTritonGemm(const HloInstruction& instr) {
-  if (instr.called_computations().size() != 1) {
+  if (instr.opcode() != HloOpcode::kFusion ||
+      instr.called_computations().size() != 1) {
     return false;
   }
   if (!IsTritonFusedComputation(*instr.called_computations()[0])) {
-    return false;
+    auto config = instr.backend_config<GpuBackendConfig>();
+    if (!config.ok() ||
+        config->fusion_backend_config().kind() !=
+            kTritonNestedGemmFusionKind) {
+      return false;
+    }
   }
   auto fused_range = instr.fused_instructions();
   return absl::c_count_if(fused_range, HloPredicateIsOp<HloOpcode::kDot>) == 1;
