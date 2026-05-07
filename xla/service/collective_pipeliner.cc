@@ -2404,7 +2404,7 @@ absl::Status TransformLoopForward(
     }
     TF_RETURN_IF_ERROR(new_while_loop->set_backend_config(config));
   }
-  return new_while_loop;
+  return absl::OkStatus();
 }
 
 absl::Status TransformFormattingOp(
