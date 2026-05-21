@@ -130,12 +130,6 @@ struct RaggedAllToAllStreamState {
   // Reference to the symmetric memory for the output buffers.
   std::shared_ptr<xla::SymmetricMemory> output_temporary_symmetric_memory;
 
-  // Reference to the symmetric memory for the device kernel input buffer.
-  tsl::TiedRef<xla::SymmetricMemory> device_input_symmetric_memory;
-
-  // Reference to the symmetric memory for the device kernel output buffer.
-  tsl::TiedRef<xla::SymmetricMemory> device_output_symmetric_memory;
-
   // Contains the output buffer pointers and barrier signal buffers for all
   // peers.
   std::shared_ptr<std::vector<RaggedAllToAllRendezvousValue>> participants;
@@ -201,8 +195,21 @@ class RaggedAllToAllThunk : public CollectiveThunk {
     return config_.zero_copy_in_one_shot_kernel;
   }
 
-  int32_t device_kernel_cta_count() const {
-    return config_.use_device_kernel ? kDeviceKernelCtaCount : 0;
+  bool UsesDeviceKernel() const {
+    return config_.use_device_kernel && config_.config.use_symmetric_buffer;
+  }
+
+  static constexpr int32_t device_kernel_cta_count() {
+    return kDeviceKernelCtaCount;
+  }
+
+  GpuDeviceCommunicator::Requirements DeviceKernelDevCommRequirements() const {
+    return GpuDeviceCommunicator::Requirements{
+        .barrier_count = device_kernel_cta_count(),
+        .lsa_barrier_count = device_kernel_cta_count(),
+        .rail_gin_barrier_count = device_kernel_cta_count(),
+        .gin_signal_count = device_kernel_cta_count(),
+        .gin_connection_full = true};
   }
 
   // Returns true if one shot kernel is supported

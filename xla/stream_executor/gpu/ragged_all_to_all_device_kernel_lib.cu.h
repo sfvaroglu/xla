@@ -46,20 +46,17 @@ __device__ void RaggedAllToAllLsaCopy(
   const int grid = static_cast<int>(gridDim.x);
   const int64_t total_lsa_updates =
       static_cast<int64_t>(lsa_size) * num_updates_per_replica;
-  const int ctas_per_unit =
-      max(1, grid / static_cast<int>(total_lsa_updates));
+  const int ctas_per_unit = max(1, grid / static_cast<int>(total_lsa_updates));
   const int unit_step = grid / ctas_per_unit;
   const int my_unit_start = static_cast<int>(blockIdx.x) / ctas_per_unit;
   const int my_cta_in_unit = static_cast<int>(blockIdx.x) % ctas_per_unit;
   if (my_unit_start >= total_lsa_updates) return;
 
-  const int unit_tid =
-      my_cta_in_unit * static_cast<int>(blockDim.x) +
-      static_cast<int>(threadIdx.x);
+  const int unit_tid = my_cta_in_unit * static_cast<int>(blockDim.x) +
+                       static_cast<int>(threadIdx.x);
   const int unit_nthreads = ctas_per_unit * static_cast<int>(blockDim.x);
 
-  for (int unit = my_unit_start; unit < total_lsa_updates;
-       unit += unit_step) {
+  for (int unit = my_unit_start; unit < total_lsa_updates; unit += unit_step) {
     const int peer_off = unit / num_updates_per_replica;
     const int update = unit % num_updates_per_replica;
     const int peer = start_lsa + peer_off;
