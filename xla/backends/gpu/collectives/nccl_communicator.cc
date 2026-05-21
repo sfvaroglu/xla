@@ -94,10 +94,11 @@ NcclCommunicator::NcclCommunicator(se::StreamExecutor* stream_executor,
       comm_(comm),
       executor_(std::move(executor)),
       cancel_(std::move(cancel)),
-      supports_one_sided_comm_(QuerySupportsOneSidedComm()) {
-  VLOG(1) << absl::StreamFormat("[%d] Created NCCL communicator %s",
+      supports_one_sided_comm_(QuerySupportsOneSidedComm()),
+      supports_gin_(QuerySupportsGin()) {
+  VLOG(1) << absl::StreamFormat("[%d] Created NCCL communicator %s (gin=%d)",
                                 stream_executor_->device_ordinal(),
-                                this->ToString());
+                                this->ToString(), supports_gin_);
 }
 
 bool NcclCommunicator::SupportsDeviceComm() const {
@@ -124,6 +125,18 @@ bool NcclCommunicator::QuerySupportsOneSidedComm() const {
 #else
   return false;
 #endif
+}
+
+bool NcclCommunicator::SupportsGin() const { return supports_gin_; }
+
+bool NcclCommunicator::QuerySupportsGin() const {
+#if NCCL_VERSION_CODE >= 22907
+  ncclCommProperties_t props = NCCL_COMM_PROPERTIES_INITIALIZER;
+  if (ncclCommQueryProperties(comm_, &props) == ncclSuccess) {
+    return props.ginType != NCCL_GIN_TYPE_NONE;
+  }
+#endif
+  return false;
 }
 
 absl::StatusOr<std::unique_ptr<GpuDeviceCommunicator>>
@@ -912,9 +925,8 @@ NcclDeviceCommunicator::~NcclDeviceCommunicator() {
 absl::StatusOr<std::unique_ptr<NcclDeviceCommunicator>>
 NcclDeviceCommunicator::CreateFrom(const NcclCommunicator& comm,
                                    const Requirements& requirements) {
-  VLOG(3) << absl::StreamFormat(
-      "Create NCCL device comm from %s: lsa_barrier_count=%d", comm.ToString(),
-      requirements.lsa_barrier_count);
+  VLOG(3) << absl::StreamFormat("Create NCCL device comm from %s: %v",
+                                comm.ToString(), requirements);
 
   DCHECK(comm.stream_executor()) << "StreamExecutor is unavailable";
   auto activation = comm.stream_executor()->Activate();
@@ -925,6 +937,19 @@ NcclDeviceCommunicator::CreateFrom(const NcclCommunicator& comm,
   reqs = NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER;
 #endif
   reqs.lsaBarrierCount = requirements.lsa_barrier_count;
+#if NCCL_VERSION_CODE >= 22907
+  reqs.barrierCount = requirements.barrier_count;
+  reqs.railGinBarrierCount = requirements.rail_gin_barrier_count;
+  reqs.ginSignalCount = requirements.gin_signal_count;
+  reqs.ginConnectionType = requirements.gin_connection_full
+                               ? NCCL_GIN_CONNECTION_FULL
+                               : NCCL_GIN_CONNECTION_NONE;
+#elif NCCL_VERSION_CODE >= 22900
+  reqs.barrierCount = requirements.barrier_count;
+  reqs.railGinBarrierCount = requirements.rail_gin_barrier_count;
+  reqs.ginSignalCount = requirements.gin_signal_count;
+  reqs.ginForceEnable = requirements.gin_connection_full;
+#endif
 
   ncclDevComm dev_comm{};
   TF_RETURN_IF_ERROR(

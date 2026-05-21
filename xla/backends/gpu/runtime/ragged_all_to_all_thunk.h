@@ -70,6 +70,10 @@ struct RaggedAllToAllConfig {
   CollectiveThunk::CollectivesMode collectives_mode =
       DebugOptions::COLLECTIVES_PRIVATE_MEMORY;
 
+  // If true, the thunk will use the device-initiated (NCCL GIN + LSA) kernel
+  // for ragged-all-to-all when symmetric buffers are available.
+  bool use_device_kernel = false;
+
   // If set, this will be used to determine if optimized kernels that assume a
   // fast interconnect can be used.
   std::optional<int64_t> fast_interconnect_slice_size_override = std::nullopt;
@@ -125,6 +129,12 @@ struct RaggedAllToAllStreamState {
 
   // Reference to the symmetric memory for the output buffers.
   std::shared_ptr<xla::SymmetricMemory> output_temporary_symmetric_memory;
+
+  // Reference to the symmetric memory for the device kernel input buffer.
+  tsl::TiedRef<xla::SymmetricMemory> device_input_symmetric_memory;
+
+  // Reference to the symmetric memory for the device kernel output buffer.
+  tsl::TiedRef<xla::SymmetricMemory> device_output_symmetric_memory;
 
   // Contains the output buffer pointers and barrier signal buffers for all
   // peers.
@@ -191,6 +201,10 @@ class RaggedAllToAllThunk : public CollectiveThunk {
     return config_.zero_copy_in_one_shot_kernel;
   }
 
+  int32_t device_kernel_cta_count() const {
+    return config_.use_device_kernel ? kDeviceKernelCtaCount : 0;
+  }
+
   // Returns true if one shot kernel is supported
   bool IsOneShotKernelSupported() const;
 
@@ -220,6 +234,8 @@ class RaggedAllToAllThunk : public CollectiveThunk {
   }
 
   const RaggedAllToAllConfig config_;
+
+  static constexpr int32_t kDeviceKernelCtaCount = 64;
 
   mutable absl::Mutex mutex_;
   absl::flat_hash_map<se::StreamExecutor*,

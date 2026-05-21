@@ -45,6 +45,7 @@ limitations under the License.
 #include "xla/backends/gpu/collectives/gpu_collectives.h"
 #include "xla/backends/gpu/collectives/gpu_communicator.h"
 #include "xla/backends/gpu/runtime/collective_clique_requests.h"
+#include "xla/backends/gpu/runtime/collective_cliques.h"
 #include "xla/backends/gpu/runtime/collective_kernel_api.h"
 #include "xla/backends/gpu/runtime/collective_memory.h"
 #include "xla/backends/gpu/runtime/collective_memory_requests.h"
@@ -148,6 +149,11 @@ RaggedAllToAllConfig GetRaggedAllToAllConfig(
           ->config()
           .debug_options()
           .xla_gpu_experimental_ragged_all_to_all_use_barrier_with_nccl();
+  config.use_device_kernel =
+      instr->GetModule()
+          ->config()
+          .debug_options()
+          .xla_gpu_experimental_ragged_all_to_all_use_device_kernel();
 
   config.collectives_mode = instr->GetModule()
                                 ->config()
@@ -302,7 +308,14 @@ RaggedAllToAllThunk::RaggedAllToAllThunk(
 CollectiveCliqueRequests::CliqueRequirements
 RaggedAllToAllThunk::GetCliqueRequirements(const GpuCliqueKey& clique_key) {
   CollectiveCliqueRequests::CliqueRequirements clique_reqs;
-  if (config_.use_multi_gpu_barrier_with_nccl_in_one_shot_kernel) {
+  if (config_.use_device_kernel && config_.config.use_symmetric_buffer) {
+    clique_reqs.dev_comm = GpuDeviceCommunicator::Requirements{
+        /*barrier_count=*/device_kernel_cta_count(),
+        /*lsa_barrier_count=*/device_kernel_cta_count(),
+        /*rail_gin_barrier_count=*/device_kernel_cta_count(),
+        /*gin_signal_count=*/device_kernel_cta_count(),
+        /*gin_connection_full=*/true};
+  } else if (config_.use_multi_gpu_barrier_with_nccl_in_one_shot_kernel) {
     clique_reqs.dev_comm =
         GpuDeviceCommunicator::Requirements{/*lsa_barrier_count=*/1};
   }
@@ -349,15 +362,25 @@ absl::StatusOr<RaggedAllToAllStreamState*> RaggedAllToAllThunk::InitializeOnce(
     return absl::InternalError("Failed to allocate output offsets buffer.");
   }
 
-  if (use_multi_gpu_barrier_with_nccl_in_one_shot_kernel()) {
+  if (use_multi_gpu_barrier_with_nccl_in_one_shot_kernel() ||
+      config_.use_device_kernel) {
     if (config_.fast_interconnect_slice_size_override.has_value()) {
       state->lsa_size = config_.fast_interconnect_slice_size_override.value();
     } else {
-      ASSIGN_OR_RETURN(
-          auto* dev_comm,
-          params.collective_cliques->GetDeviceComm(
-              state->clique_key, state->rank,
-              GpuDeviceCommunicator::Requirements{/*lsa_barrier_count=*/1}));
+      GpuDeviceCommunicator::Requirements req;
+      if (config_.use_device_kernel) {
+        req = GpuDeviceCommunicator::Requirements{
+            /*barrier_count=*/device_kernel_cta_count(),
+            /*lsa_barrier_count=*/device_kernel_cta_count(),
+            /*rail_gin_barrier_count=*/device_kernel_cta_count(),
+            /*gin_signal_count=*/device_kernel_cta_count(),
+            /*gin_connection_full=*/true};
+      } else {
+        req = GpuDeviceCommunicator::Requirements{/*lsa_barrier_count=*/1};
+      }
+      ASSIGN_OR_RETURN(auto* dev_comm,
+                       params.collective_cliques->GetDeviceComm(
+                           state->clique_key, state->rank, req));
 
       state->lsa_size = dev_comm->lsa_size();
     }
@@ -420,8 +443,38 @@ absl::Status RaggedAllToAllThunk::Initialize(const InitializeParams& params) {
   //      was released. NCCL communicator can be destroyed in comm splitting
   //      process, but generally it should not change between executions, so
   //      it's safe to cache the symmetric handler.
-  if (state->lsa_size.has_value() &&
-      state->lsa_size.value() == state->clique_key.num_devices()) {
+  if (config_.use_device_kernel && config_.config.use_symmetric_buffer) {
+    ASSIGN_OR_RETURN(auto* comm, params.collective_cliques->GetComm(
+                                     state->clique_key, state->rank));
+    ASSIGN_OR_RETURN(
+        std::vector<DeviceBufferPair> device_buffers,
+        ConvertToDeviceBuffers(params.buffer_allocations, buffers(),
+                               config_.config.operand_element_type));
+
+    const se::DeviceAddressBase& input_buffer = device_buffers[0].source_buffer;
+    const se::DeviceAddressBase& output_buffer =
+        device_buffers[1].destination_buffer;
+
+    if (state->device_input_symmetric_memory.Expired()) {
+      ASSIGN_OR_RETURN(auto input_parent,
+                       params.executor->GetMemoryRange(input_buffer));
+      ASSIGN_OR_RETURN(auto sym_mem, comm->CreateSymmetricMemory(input_parent));
+      ASSIGN_OR_RETURN(state->device_input_symmetric_memory,
+                       params.collective_cliques->Tie(state->clique_key,
+                                                      std::move(sym_mem)));
+    }
+
+    if (state->device_output_symmetric_memory.Expired()) {
+      ASSIGN_OR_RETURN(auto output_parent,
+                       params.executor->GetMemoryRange(output_buffer));
+      ASSIGN_OR_RETURN(auto sym_mem,
+                       comm->CreateSymmetricMemory(output_parent));
+      ASSIGN_OR_RETURN(state->device_output_symmetric_memory,
+                       params.collective_cliques->Tie(state->clique_key,
+                                                      std::move(sym_mem)));
+    }
+  } else if (state->lsa_size.has_value() &&
+             state->lsa_size.value() == state->clique_key.num_devices()) {
     ASSIGN_OR_RETURN(auto* comm, params.collective_cliques->GetComm(
                                      state->clique_key, state->rank));
 
@@ -613,7 +666,8 @@ RaggedAllToAllThunk::FromProto(
           config, thunk_proto.num_total_updates(), thunk_proto.num_input_rows(),
           thunk_proto.num_row_elements(), thunk_proto.one_shot_kernel_enabled(),
           thunk_proto.use_multi_gpu_barrier_with_nccl_in_one_shot_kernel(),
-          thunk_proto.collectives_mode(), fast_interconnect_slice_size_override,
+          thunk_proto.collectives_mode(), thunk_proto.use_device_kernel(),
+          fast_interconnect_slice_size_override,
           thunk_proto.zero_copy_in_one_shot_kernel()},
       std::move(buffers));
 }
@@ -638,6 +692,7 @@ absl::StatusOr<ThunkProto> RaggedAllToAllThunk::ToProto() const {
   thunk_proto->set_use_multi_gpu_barrier_with_nccl_in_one_shot_kernel(
       use_multi_gpu_barrier_with_nccl_in_one_shot_kernel());
   thunk_proto->set_collectives_mode(collectives_mode());
+  thunk_proto->set_use_device_kernel(config_.use_device_kernel);
   thunk_proto->set_fast_interconnect_slice_size_override(
       config_.fast_interconnect_slice_size_override.value_or(0));
   thunk_proto->set_zero_copy_in_one_shot_kernel(zero_copy_in_one_shot_kernel());
@@ -660,6 +715,59 @@ absl::Status RaggedAllToAllThunk::RunCollective(const ExecuteParams& params,
   {
     absl::MutexLock lock(mutex_);
     state = per_stream_states_[stream.parent()].get();
+  }
+
+  if (config_.use_device_kernel &&
+      !state->device_input_symmetric_memory.Expired() &&
+      !state->device_output_symmetric_memory.Expired()) {
+    ASSIGN_OR_RETURN(auto* dev_comm,
+                     params.collective_cliques->GetDeviceComm(
+                         clique_key, state->rank,
+                         GpuDeviceCommunicator::Requirements{
+                             /*barrier_count=*/device_kernel_cta_count(),
+                             /*lsa_barrier_count=*/device_kernel_cta_count(),
+                             /*rail_gin_barrier_count=*/device_kernel_cta_count(),
+                             /*gin_signal_count=*/device_kernel_cta_count(),
+                             /*gin_connection_full=*/true}));
+
+    ASSIGN_OR_RETURN(int32_t num_ranks, comm.NumRanks());
+
+    auto* gpu_comm = tsl::down_cast<GpuCommunicator*>(&comm);
+    XLA_VLOG_DEVICE(3, state->device_ordinal)
+        << "Device kernel: lsa_size=" << dev_comm->lsa_size()
+        << " num_ranks=" << num_ranks << " gin=" << gpu_comm->SupportsGin()
+        << " cta_count=" << device_kernel_cta_count()
+        << " num_updates_per_replica="
+        << (config_.num_total_updates / num_ranks)
+        << " num_row_elements=" << config_.num_row_elements << " element_type="
+        << primitive_util::LowercasePrimitiveTypeName(
+               device_buffers[0].element_type);
+
+    auto input_sym_mem = state->device_input_symmetric_memory.Lock();
+    auto output_sym_mem = state->device_output_symmetric_memory.Lock();
+
+    const se::DeviceAddressBase& input_buffer = device_buffers[0].source_buffer;
+    const se::DeviceAddressBase& output_buffer =
+        device_buffers[1].destination_buffer;
+
+    int64_t input_buffer_offset_bytes = static_cast<int64_t>(
+        reinterpret_cast<uintptr_t>(input_buffer.opaque()) -
+        reinterpret_cast<uintptr_t>(input_sym_mem->addr().opaque()));
+    int64_t output_buffer_offset_bytes = static_cast<int64_t>(
+        reinterpret_cast<uintptr_t>(output_buffer.opaque()) -
+        reinterpret_cast<uintptr_t>(output_sym_mem->addr().opaque()));
+
+    int64_t num_updates_per_replica = config_.num_total_updates / num_ranks;
+
+    PrimitiveType element_type = device_buffers[0].element_type;
+
+    return RunDeviceRaggedAllToAllKernel(
+        &stream, element_type, dev_comm, input_sym_mem.get(),
+        output_sym_mem.get(), device_buffers[2].source_buffer,
+        device_buffers[3].source_buffer, device_buffers[4].source_buffer,
+        num_ranks, num_updates_per_replica, config_.num_row_elements,
+        device_kernel_cta_count(), input_buffer_offset_bytes,
+        output_buffer_offset_bytes);
   }
 
   FabricHomogeneity homogeneity =

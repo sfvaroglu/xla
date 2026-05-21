@@ -322,8 +322,6 @@ absl::Status AssignColors(bool use_collective_memory, bool use_nvshmem,
          alias_analysis->GetBufferContainingValue(*value).values()) {
       TF_RET_CHECK(alias != nullptr);
 
-      // Check if any use of this alias is a custom call operand with a
-      // requested memory space.
       for (const HloUse& use : alias->GetUses()) {
         ASSIGN_OR_RETURN(MemorySpaceColor operand_ms,
                          GetCustomCallOperandMemorySpace(use));
@@ -378,7 +376,6 @@ absl::Status AssignColors(bool use_collective_memory, bool use_nvshmem,
       }
     }
 
-    // Fall back to default memory space if no alias required special coloring.
     if (!value->has_color()) {
       value->set_color((int)MemorySpaceColor::kDefault);
     }

@@ -52,7 +52,7 @@ limitations under the License.
 #if NCCL_VERSION_CODE >= 22800
 // Device initiated collective operations were added in NCCL 2.28.0.
 #include "third_party/nccl/nccl_device.h"  // IWYU pragma: keep
-#endif                                          // NCCL_VERSION_CODE >= 22800
+#endif                                     // NCCL_VERSION_CODE >= 22800
 
 namespace xla::gpu {
 
@@ -94,6 +94,7 @@ class NcclCommunicator : public GpuCommunicator {
 
   bool SupportsDeviceComm() const final;
   bool SupportsOneSidedComm() const final;
+  bool SupportsGin() const final;
 
   absl::StatusOr<std::unique_ptr<GpuDeviceCommunicator>> CreateDeviceComm(
       const GpuDeviceCommunicator::Requirements& requirements) final;
@@ -221,6 +222,9 @@ class NcclCommunicator : public GpuCommunicator {
   // Queries NCCL for one-sided comm support. Called once at construction.
   bool QuerySupportsOneSidedComm() const;
 
+  // Queries NCCL for GIN support. Called once at construction.
+  bool QuerySupportsGin() const;
+
   // Polls the communicator until any pending non-blocking operations are "done"
   // or aborted.
   absl::Status PollUntilDone() const;
@@ -275,6 +279,9 @@ class NcclCommunicator : public GpuCommunicator {
 
   // Cached result of querying NCCL for one-sided comm support.
   bool supports_one_sided_comm_ = false;
+
+  // Cached result of querying NCCL for GIN support.
+  bool supports_gin_ = false;
 
   // Nesting level of current NCCL group
   int group_nesting_level_ = 0;
