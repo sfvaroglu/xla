@@ -1091,6 +1091,15 @@ NcclDeviceCommunicator::CreateFrom(const NcclCommunicator& comm,
   reqs.barrierCount = use_gin ? requirements.barrier_count : 0;
   reqs.railGinBarrierCount = use_gin ? requirements.rail_gin_barrier_count : 0;
   reqs.ginSignalCount = use_gin ? requirements.gin_signal_count : 0;
+#if NCCL_VERSION_CODE >= 22907
+  if (!use_gin) {
+    reqs.ginContextCount = 0;
+    reqs.ginCounterCount = 0;
+    reqs.ginQueueDepth = 0;
+    reqs.ginStrongSignalsRequired = false;
+    reqs.ginVaSignalsRequired = false;
+  }
+#endif
   SetDevCommGinConnection(reqs, use_gin, requirements.gin_connection_full);
 #else
   reqs.lsaBarrierCount = requirements.lsa_barrier_count;
