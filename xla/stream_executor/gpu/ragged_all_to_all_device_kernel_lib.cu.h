@@ -199,7 +199,6 @@ __global__ void __launch_bounds__(512) RaggedAllToAllDeviceKernelImpl(
   } else {
     ncclLsaBarrierSession<ncclCoopCta> bar{ncclCoopCta(), dev_comm,
                                            ncclTeamTagLsa{}, blockIdx.x};
-    bar.sync(ncclCoopCta(), ::cuda::memory_order_relaxed);
 
     RaggedAllToAllCopy<kVectorSize>(
         send_win, recv_win, input_offsets_ptr, send_sizes_ptr,
