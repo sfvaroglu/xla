@@ -48,8 +48,10 @@ namespace stream_executor::gpu {
 //     first barrier launch.
 struct MultiGpuBarrierKernel {
   // Maximum number of peers supported by the barrier.
-  // Can be extended to support larger GPU clusters in the future.
-  static constexpr int64_t kMaxPeers = 32;
+  // Raised from 32 to 128 to cover full NVL72 (up to 72) and other
+  // rack-scale NVLink domains; the kernel is fully parameterized on this
+  // constant. See openxla/xla#47283.
+  static constexpr int64_t kMaxPeers = 128;
 
   using KernelType =
       stream_executor::TypedKernel<int64_t, int64_t,
@@ -65,8 +67,13 @@ struct MultiGpuBarrierKernel {
 //  to do host-side rendezvous to exchange pointers.
 struct MultiGpuBarrierWithNcclKernel {
   // Maximum number of peers supported by the barrier.
-  // Can be extended to support larger GPU clusters in the future.
-  static constexpr int64_t kMaxPeers = 32;
+  // Raised from 32 to 128 to cover full NVL72 (up to 72) and other
+  // rack-scale NVLink domains. This variant lacks a bounds check at the
+  // launcher (unlike the plain MultiGpuBarrierKernel), so at >32 ranks
+  // the device kernel used to index signal slots past the 32-slot region
+  // of the symmetric window, corrupting device memory (or crashing with
+  // CUDA_ERROR_ILLEGAL_ADDRESS). See openxla/xla#47283.
+  static constexpr int64_t kMaxPeers = 128;
 
   using KernelType = stream_executor::TypedKernel<
       int64_t, int64_t, xla::SymmetricMemory*,  // signal buffers
