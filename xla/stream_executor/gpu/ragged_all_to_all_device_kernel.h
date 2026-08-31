@@ -36,8 +36,8 @@ namespace stream_executor::gpu {
 // The kernel's __launch_bounds__ passes kRaggedAllToAllDeviceKernelCtasPerSm
 // as minBlocksPerMultiprocessor, so the register allocator must preserve
 // that residency (64 registers/thread at 8x128 on a 64K-register SM).
-inline constexpr int kRaggedAllToAllDeviceKernelThreadsPerCta = 128;
-inline constexpr int kRaggedAllToAllDeviceKernelCtasPerSm = 8;
+inline constexpr int kRaggedAllToAllDeviceKernelThreadsPerCta = 512;
+inline constexpr int kRaggedAllToAllDeviceKernelCtasPerSm = 1;
 
 template <int64_t kVectorSize>
 struct RaggedAllToAllDeviceKernel {
